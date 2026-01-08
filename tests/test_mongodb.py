@@ -28,7 +28,7 @@ class TestMongoDBClient:
         mock_collection = Mock()
         mock_collection.insert_one.return_value.inserted_id = "test_id_123"
         
-        mock_db = Mock()
+        mock_db = MagicMock()
         mock_db.__getitem__.return_value = mock_collection
         
         client.db = mock_db
@@ -58,7 +58,7 @@ class TestMongoDBClient:
             "model_version": "v1.0"
         }
         
-        mock_db = Mock()
+        mock_db = MagicMock()
         mock_db.__getitem__.return_value = mock_collection
         
         client.db = mock_db
@@ -78,7 +78,7 @@ class TestMongoDBClient:
         mock_collection = Mock()
         mock_collection.insert_one.return_value.inserted_id = "pred_id_123"
         
-        mock_db = Mock()
+        mock_db = MagicMock()
         mock_db.__getitem__.return_value = mock_collection
         
         client.db = mock_db
@@ -102,7 +102,7 @@ class TestMongoDBClient:
         mock_collection = Mock()
         mock_collection.insert_one.return_value.inserted_id = "metrics_id_123"
         
-        mock_db = Mock()
+        mock_db = MagicMock()
         mock_db.__getitem__.return_value = mock_collection
         
         client.db = mock_db

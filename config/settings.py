@@ -1,11 +1,17 @@
 """Configuration settings for the MLOps pipeline."""
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, ConfigDict
 from typing import Optional
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+    
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False
+    )
     
     # MongoDB Configuration
     mongodb_host: str = Field(default="localhost", alias="MONGODB_HOST")
@@ -40,11 +46,6 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-
     @property
     def mongodb_connection_string(self) -> str:
         """Build MongoDB connection string."""
