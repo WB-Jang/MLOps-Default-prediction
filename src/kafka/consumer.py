@@ -119,7 +119,7 @@ class KafkaDataConsumer:
                         'topic': record.topic,
                         'partition': record.partition,
                         'offset': record.offset,
-                        'key': record.key.decode('utf-8') if record.key else None,
+                        'key': record.key.decode('utf-8') if record.key and isinstance(record.key, bytes) else record.key,
                         'value': record.value
                     })
             

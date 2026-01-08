@@ -70,6 +70,9 @@ def pretrain_model(**context):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
+    # Generate timestamp once for consistency
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
     # Create encoder and projection head
     # Note: In production, these parameters should come from data
     cat_max_dict = {i: 100 for i in range(10)}  # Placeholder
@@ -97,7 +100,7 @@ def pretrain_model(**context):
     # Save pretrained encoder
     pretrain_path = os.path.join(
         settings.model_save_path,
-        f"pretrained_encoder_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
+        f"pretrained_encoder_{timestamp}.pth"
     )
     torch.save({
         'encoder_state_dict': encoder.state_dict(),
@@ -112,7 +115,7 @@ def pretrain_model(**context):
         model_id = mongodb_client.store_model_metadata(
             model_name="default_prediction_encoder",
             model_path=pretrain_path,
-            model_version=datetime.now().strftime('%Y%m%d_%H%M%S'),
+            model_version=timestamp,
             hyperparameters={
                 "d_model": settings.d_model,
                 "nhead": settings.nhead,
@@ -136,6 +139,9 @@ def train_classifier_model(**context):
     pretrain_result = ti.xcom_pull(task_ids='pretrain_model')
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Generate timestamp once for consistency
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     # Load pretrained encoder
     cat_max_dict = {i: 100 for i in range(10)}  # Placeholder
@@ -164,7 +170,7 @@ def train_classifier_model(**context):
     # Save trained classifier
     classifier_path = os.path.join(
         settings.model_save_path,
-        f"classifier_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
+        f"classifier_{timestamp}.pth"
     )
     torch.save({
         'model_state_dict': classifier.state_dict(),
@@ -178,7 +184,7 @@ def train_classifier_model(**context):
         model_id = mongodb_client.store_model_metadata(
             model_name="default_prediction_classifier",
             model_path=classifier_path,
-            model_version=datetime.now().strftime('%Y%m%d_%H%M%S'),
+            model_version=timestamp,
             hyperparameters={
                 "d_model": settings.d_model,
                 "final_hidden": 128,

@@ -2,6 +2,7 @@
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+from bson import ObjectId
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from loguru import logger
@@ -210,11 +211,18 @@ class MongoDBClient:
         Update model status in MongoDB.
         
         Args:
-            model_id: ID of the model
+            model_id: ID of the model (can be string or ObjectId)
             status: New status (e.g., 'training', 'deployed', 'archived')
             notes: Optional notes about the status change
         """
         collection = self.get_collection("model_metadata")
+        
+        # Convert string ID to ObjectId if needed
+        try:
+            object_id = ObjectId(model_id) if isinstance(model_id, str) else model_id
+        except Exception:
+            # If not a valid ObjectId, use as is (custom string ID)
+            object_id = model_id
         
         update_doc = {
             "$set": {
@@ -226,7 +234,7 @@ class MongoDBClient:
         if notes:
             update_doc["$set"]["notes"] = notes
         
-        collection.update_one({"_id": model_id}, update_doc)
+        collection.update_one({"_id": object_id}, update_doc)
         logger.info(f"Model {model_id} status updated to: {status}")
 
 

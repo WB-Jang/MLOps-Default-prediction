@@ -1,6 +1,6 @@
 """Kafka producer for sending data to Kafka topics."""
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from loguru import logger
@@ -99,7 +99,7 @@ class KafkaDataProducer:
             logger.error(f"Failed to send message to {topic}: {e}")
             raise
     
-    def send_batch(self, topic: str, messages: list[Dict[str, Any]]) -> None:
+    def send_batch(self, topic: str, messages: List[Dict[str, Any]]) -> None:
         """
         Send a batch of messages to a Kafka topic.
         
