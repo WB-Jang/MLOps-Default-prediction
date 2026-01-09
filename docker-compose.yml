@@ -1,0 +1,173 @@
+version: '3.8'
+
+services:
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - mlops-network
+
+  # Kafka broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+    networks:
+      - mlops-network
+
+  # MongoDB
+  mongodb:
+    image: mongo:7.0
+    hostname: mongodb
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: changeme
+      MONGO_INITDB_DATABASE: mlops_default_prediction
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - mlops-network
+
+  # PostgreSQL for Airflow metadata
+  postgres:
+    image: postgres:14
+    hostname: postgres
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - mlops-network
+
+  # Airflow webserver
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    hostname: airflow-webserver
+    container_name: airflow-webserver
+    depends_on:
+      - postgres
+      - kafka
+      - mongodb
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: 27017
+      MONGODB_DATABASE: mlops_default_prediction
+      MONGODB_USERNAME: admin
+      MONGODB_PASSWORD: changeme
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    volumes:
+      - ./src/airflow/dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config:/opt/airflow/config
+      - ./models:/opt/airflow/models
+      - airflow_logs:/opt/airflow/logs
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - mlops-network
+
+  # Airflow scheduler
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    hostname: airflow-scheduler
+    container_name: airflow-scheduler
+    depends_on:
+      - postgres
+      - kafka
+      - mongodb
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: 27017
+      MONGODB_DATABASE: mlops_default_prediction
+      MONGODB_USERNAME: admin
+      MONGODB_PASSWORD: changeme
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    volumes:
+      - ./src/airflow/dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config:/opt/airflow/config
+      - ./models:/opt/airflow/models
+      - airflow_logs:/opt/airflow/logs
+    command: scheduler
+    networks:
+      - mlops-network
+
+  # Airflow init (run once to initialize database)
+  airflow-init:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: airflow-init
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    volumes:
+      - ./src/airflow/dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./config:/opt/airflow/config
+    command: >
+      bash -c "airflow db init &&
+               airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin"
+    networks:
+      - mlops-network
+
+volumes:
+  mongodb_data:
+  postgres_data:
+  airflow_logs:
+
+networks:
+  mlops-network:
+    driver: bridge
