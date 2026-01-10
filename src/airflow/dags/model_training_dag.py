@@ -16,7 +16,6 @@ from src.models import (
     pretrain_contrastive,
     train_classifier
 )
-from src.kafka.consumer import ProcessedDataConsumer
 from src.database.mongodb import mongodb_client
 from src.data.data_loader import load_data_for_training
 from config.settings import settings
@@ -223,37 +222,37 @@ def train_classifier_model(**context):
 
 
 def notify_training_complete(**context):
-    """Send notification that training is complete."""
+    """Store notification that training is complete in MongoDB."""
     logger.info("Training pipeline completed")
     
     # Get model info from previous task
     ti = context['ti']
     classifier_result = ti.xcom_pull(task_ids='train_classifier')
     
-    # Send command to Kafka
-    from src.kafka.producer import kafka_producer
-    kafka_producer.connect()
+    # Store completion notification in MongoDB
+    mongodb_client.connect()
     
     try:
-        kafka_producer.send_command({
-            "command": "training_complete",
-            "timestamp": datetime.utcnow().isoformat(),
+        mongodb_client.get_collection("training_events").insert_one({
+            "event_type": "training_complete",
+            "timestamp": datetime.utcnow(),
             "model_id": classifier_result.get('model_id'),
-            "model_path": classifier_result.get('model_path')
-        }, key="training")
-        logger.info("Training completion notification sent")
+            "model_path": classifier_result.get('model_path'),
+            "status": "completed"
+        })
+        logger.info("Training completion notification stored in MongoDB")
     finally:
-        kafka_producer.disconnect()
+        mongodb_client.disconnect()
 
 
 # Define DAG
 with DAG(
     'model_training_pipeline',
     default_args=default_args,
-    description='Model training pipeline with Kafka and MongoDB',
+    description='Model training pipeline with MongoDB',
     schedule_interval=timedelta(days=1),
     catchup=False,
-    tags=['kafka', 'training', 'mongodb'],
+    tags=['training', 'mongodb'],
 ) as dag:
     
     # Task 1: Prepare training data

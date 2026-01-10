@@ -152,14 +152,13 @@ docker-compose logs -f mongodb
 
 **Access Services:**
 - Airflow UI: http://localhost:8080 (username: `admin`, password: `admin`)
-- Kafka: localhost:9092
 - MongoDB: localhost:27017
 
 **Run the Pipeline via Airflow:**
 
 1. Navigate to Airflow UI (http://localhost:8080)
 2. Enable the DAGs:
-   - `data_ingestion_pipeline` - Loads raw data and sends to Kafka
+   - `data_ingestion_pipeline` - Loads raw data and stores to MongoDB
    - `model_training_pipeline` - Trains models end-to-end
    - `model_evaluation_pipeline` - Evaluates trained models
 3. Trigger DAGs manually or let them run on schedule:
@@ -183,12 +182,6 @@ pip install -r requirements.txt
 **Start Required Services:**
 
 ```bash
-# Start Kafka (in separate terminal)
-docker run -d --name kafka -p 9092:9092 \
-  -e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
-  confluentinc/cp-kafka:7.5.0
-
 # Start MongoDB (in separate terminal)
 docker run -d --name mongodb -p 27017:27017 \
   -e MONGO_INITDB_ROOT_USERNAME=admin \
@@ -236,13 +229,13 @@ python train.py --help
 ┌─────────────────────────────────────────────────────────────────┐
 │ 2. DATA INGESTION                                               │
 │    Airflow DAG: data_ingestion_pipeline                         │
-│    └─> Loads CSV → Sends to Kafka raw_data topic               │
+│    └─> Loads CSV → Stores to MongoDB raw_data collection       │
 └────────────────────┬────────────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. DATA PROCESSING                                              │
-│    DAG processes raw data → Kafka processed_data topic          │
+│    DAG processes raw data → MongoDB processed_data collection   │
 │    └─> Normalizes features, encodes categoricals               │
 └────────────────────┬────────────────────────────────────────────┘
                      │
@@ -250,6 +243,7 @@ python train.py --help
 ┌─────────────────────────────────────────────────────────────────┐
 │ 4. MODEL TRAINING                                               │
 │    Airflow DAG: model_training_pipeline                         │
+│    ├─> Loads data from CSV or MongoDB                          │
 │    ├─> Pretrain encoder (contrastive learning)                 │
 │    ├─> Train classifier (supervised)                            │
 │    ├─> Save models to ./models/*.pth                            │
@@ -325,12 +319,6 @@ Edit `.env` file or set environment variables:
 MONGODB_HOST=localhost
 MONGODB_PORT=27017
 MONGODB_DATABASE=mlops_default_prediction
-
-# Kafka Configuration
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-KAFKA_RAW_DATA_TOPIC=raw_data
-KAFKA_PROCESSED_DATA_TOPIC=processed_data
-KAFKA_COMMANDS_TOPIC=commands
 
 # Model Configuration
 MODEL_SAVE_PATH=./models
@@ -426,23 +414,7 @@ FileNotFoundError: Data file not found: ./data/raw/synthetic_data.csv
 ```
 **Solution:** Run `python generate_raw_data.py` to generate the data file.
 
-**2. Kafka connection refused**
-```bash
-ConnectionError: Kafka broker not available at localhost:9092
-```
-**Solution:**
-```bash
-# Check if Kafka is running
-docker ps | grep kafka
-
-# Start Kafka
-docker-compose up -d kafka
-
-# View Kafka logs
-docker-compose logs kafka
-```
-
-**3. MongoDB connection issues**
+**2. MongoDB connection issues**
 ```bash
 # Check MongoDB is running
 docker ps | grep mongodb
@@ -451,7 +423,7 @@ docker ps | grep mongodb
 docker exec -it mongodb mongosh
 ```
 
-**4. Airflow DAG not appearing**
+**3. Airflow DAG not appearing**
 ```bash
 # Check DAG syntax
 python src/airflow/dags/data_ingestion_dag.py
@@ -461,12 +433,6 @@ python src/airflow/dags/data_ingestion_dag.py
 
 # View scheduler logs
 docker-compose logs airflow-scheduler
-```
-
-**5. CUDA/GPU issues**
-```bash
-# Train on CPU explicitly
-python train.py --train --device cpu
 ```
 
 ### Viewing Logs
@@ -479,7 +445,6 @@ tail -f logs/data_generation_*.log
 # Docker service logs
 docker-compose logs -f airflow-scheduler
 docker-compose logs -f airflow-webserver
-docker-compose logs -f kafka
 docker-compose logs -f mongodb
 ```
 
@@ -498,51 +463,21 @@ rm -rf data/raw/*.csv models/*.pth logs/*.log
 
 ## Advanced Usage
 
-### Batch Inference
+### Accessing MongoDB Data
 
-```python
-from src.data.data_loader import DataLoader
-from src.models import TabTransformerClassifier
-import torch
+```bash
+# Connect to MongoDB (if using Docker)
+docker exec -it mongodb mongosh
 
-# Load test data
-loader = DataLoader("./data/raw/test_data.csv")
-X, y = loader.get_features_and_target()
+# View collections
+use mlops_default_prediction
+show collections
 
-# Load model
-model = TabTransformerClassifier(...)
-checkpoint = torch.load("./models/classifier_latest.pth")
-model.load_state_dict(checkpoint['model_state_dict'])
-
-# Batch prediction
-model.eval()
-predictions = []
-with torch.no_grad():
-    for i in range(0, len(X), 32):  # Batch size 32
-        batch_X = X[i:i+32]
-        # Separate categorical and numerical features
-        x_cat = torch.tensor(batch_X[cat_cols].values)
-        x_num = torch.tensor(batch_X[num_cols].values)
-        pred = model(x_cat, x_num)
-        predictions.extend(pred.argmax(dim=1).tolist())
-```
-
-### Custom Data Pipeline
-
-```python
-from src.kafka.producer import kafka_producer
-from src.data.preprocessing import DataPreprocessor
-
-# Send custom data to pipeline
-kafka_producer.connect()
-
-custom_data = {
-    "loan_id": "CUSTOM-001",
-    "features": {...}  # Your feature dictionary
-}
-
-kafka_producer.send_raw_data(custom_data, key="custom")
-kafka_producer.disconnect()
+# Query data
+db.raw_data.find().limit(5)
+db.model_metadata.find().pretty()
+db.training_events.find().sort({timestamp: -1}).limit(10)
+db.evaluation_events.find().sort({timestamp: -1}).limit(10)
 ```
 
 ## Deployment
