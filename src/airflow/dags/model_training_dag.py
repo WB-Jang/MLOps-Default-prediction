@@ -18,6 +18,7 @@ from src.models import (
 )
 from src.kafka.consumer import ProcessedDataConsumer
 from src.database.mongodb import mongodb_client
+from src.data.data_loader import load_data_for_training
 from config.settings import settings
 from loguru import logger
 
@@ -34,38 +35,52 @@ default_args = {
 
 
 def prepare_training_data(**context):
-    """Prepare training data from Kafka."""
-    logger.info("Preparing training data from Kafka")
+    """Prepare training data from raw CSV file."""
+    logger.info("Preparing training data")
     
-    # Connect to Kafka consumer
-    consumer = ProcessedDataConsumer(group_id="training_consumer")
-    consumer.connect()
-    
-    mongodb_client.connect()
+    data_path = "./data/raw/synthetic_data.csv"
     
     try:
-        # Consume processed data
-        messages = consumer.consume_batch(batch_size=1000, timeout_ms=10000)
-        logger.info(f"Retrieved {len(messages)} messages for training")
+        # Load data using data loader
+        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
+            data_path=data_path,
+            test_size=0.2,
+            random_state=42
+        )
         
-        # Store data preparation metadata
-        mongodb_client.get_collection("training_data").insert_one({
-            "timestamp": datetime.utcnow(),
-            "num_samples": len(messages),
-            "status": "prepared"
-        })
+        logger.info(f"Loaded training data: {len(X_train)} train, {len(X_test)} test samples")
+        logger.info(f"Features: {metadata['num_categorical_features']} categorical, "
+                   f"{metadata['num_numerical_features']} numerical")
         
-        # Push data info to XCom for next task
-        return {"num_samples": len(messages)}
+        # Store metadata in MongoDB
+        mongodb_client.connect()
+        try:
+            mongodb_client.get_collection("training_data").insert_one({
+                "timestamp": datetime.utcnow(),
+                "num_train_samples": len(X_train),
+                "num_test_samples": len(X_test),
+                "num_categorical_features": metadata['num_categorical_features'],
+                "num_numerical_features": metadata['num_numerical_features'],
+                "status": "prepared"
+            })
+        finally:
+            mongodb_client.disconnect()
         
-    finally:
-        consumer.disconnect()
-        mongodb_client.disconnect()
+        # Push metadata to XCom for next tasks
+        return metadata
+        
+    except Exception as e:
+        logger.error(f"Error preparing training data: {e}")
+        raise
 
 
 def pretrain_model(**context):
     """Pretrain the encoder using contrastive learning."""
     logger.info("Starting model pretraining")
+    
+    # Get metadata from previous task
+    ti = context['ti']
+    metadata = ti.xcom_pull(task_ids='prepare_training_data')
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -73,13 +88,11 @@ def pretrain_model(**context):
     # Generate timestamp once for consistency
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
-    # Create encoder and projection head
-    # Note: In production, these parameters should come from data
-    cat_max_dict = {i: 100 for i in range(10)}  # Placeholder
+    # Create encoder with actual dimensions from data
     encoder = Encoder(
-        cnt_cat_features=10,
-        cnt_num_features=10,
-        cat_max_dict=cat_max_dict,
+        cnt_cat_features=metadata['num_categorical_features'],
+        cnt_num_features=metadata['num_numerical_features'],
+        cat_max_dict=metadata['cat_max_dict'],
         d_model=settings.d_model,
         nhead=settings.nhead,
         num_layers=settings.num_layers,
@@ -91,8 +104,10 @@ def pretrain_model(**context):
         projection_dim=128
     )
     
-    # In production, loader should be created from actual data
-    # For now, we'll skip the actual training and save the initialized model
+    # In production with actual training loop:
+    # (X_train, y_train), (X_test, y_test), _ = load_data_for_training()
+    # train_loader = create_dataloader(X_train, y_train)
+    # pretrain_contrastive(encoder, projection_head, train_loader, epochs=settings.pretrain_epochs)
     
     # Ensure model save directory exists
     os.makedirs(settings.model_save_path, exist_ok=True)
@@ -105,6 +120,7 @@ def pretrain_model(**context):
     torch.save({
         'encoder_state_dict': encoder.state_dict(),
         'projection_head_state_dict': projection_head.state_dict(),
+        'metadata': metadata
     }, pretrain_path)
     
     logger.info(f"Pretrained encoder saved to {pretrain_path}")
@@ -121,11 +137,13 @@ def pretrain_model(**context):
                 "nhead": settings.nhead,
                 "num_layers": settings.num_layers,
                 "dim_feedforward": settings.dim_feedforward,
-                "dropout_rate": settings.dropout_rate
+                "dropout_rate": settings.dropout_rate,
+                "num_categorical_features": metadata['num_categorical_features'],
+                "num_numerical_features": metadata['num_numerical_features']
             }
         )
         logger.info(f"Model metadata stored with ID: {model_id}")
-        return {"model_id": model_id, "model_path": pretrain_path}
+        return {"model_id": model_id, "model_path": pretrain_path, "metadata": metadata}
     finally:
         mongodb_client.disconnect()
 
@@ -134,9 +152,10 @@ def train_classifier_model(**context):
     """Train the classifier model."""
     logger.info("Starting classifier training")
     
-    # Get pretrained model path from previous task
+    # Get pretrained model info from previous task
     ti = context['ti']
     pretrain_result = ti.xcom_pull(task_ids='pretrain_model')
+    metadata = pretrain_result.get('metadata', {})
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -144,11 +163,10 @@ def train_classifier_model(**context):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     # Load pretrained encoder
-    cat_max_dict = {i: 100 for i in range(10)}  # Placeholder
     encoder = Encoder(
-        cnt_cat_features=10,
-        cnt_num_features=10,
-        cat_max_dict=cat_max_dict,
+        cnt_cat_features=metadata.get('num_categorical_features', 10),
+        cnt_num_features=metadata.get('num_numerical_features', 10),
+        cat_max_dict=metadata.get('cat_max_dict', {i: 100 for i in range(10)}),
         d_model=settings.d_model,
         nhead=settings.nhead,
         num_layers=settings.num_layers,
@@ -164,8 +182,11 @@ def train_classifier_model(**context):
         dropout_rate=settings.dropout_rate
     )
     
-    # In production, train with actual data
-    # For now, save the initialized model
+    # In production with actual training loop:
+    # (X_train, y_train), (X_test, y_test), _ = load_data_for_training()
+    # train_loader = create_dataloader(X_train, y_train)
+    # val_loader = create_dataloader(X_test, y_test)
+    # metrics = train_classifier(classifier, train_loader, val_loader, epochs=settings.epochs)
     
     # Save trained classifier
     classifier_path = os.path.join(
@@ -174,6 +195,7 @@ def train_classifier_model(**context):
     )
     torch.save({
         'model_state_dict': classifier.state_dict(),
+        'metadata': metadata
     }, classifier_path)
     
     logger.info(f"Classifier saved to {classifier_path}")
@@ -188,9 +210,11 @@ def train_classifier_model(**context):
             hyperparameters={
                 "d_model": settings.d_model,
                 "final_hidden": 128,
-                "dropout_rate": settings.dropout_rate
+                "dropout_rate": settings.dropout_rate,
+                "num_categorical_features": metadata.get('num_categorical_features', 10),
+                "num_numerical_features": metadata.get('num_numerical_features', 10)
             },
-            metrics={"train_loss": 0.0}  # Placeholder
+            metrics={"train_loss": 0.0}  # Placeholder - add actual metrics from training
         )
         logger.info(f"Classifier metadata stored with ID: {model_id}")
         return {"model_id": model_id, "model_path": classifier_path}

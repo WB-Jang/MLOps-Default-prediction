@@ -13,6 +13,7 @@ from src.models import (
     pretrain_contrastive,
     train_classifier
 )
+from src.data.data_loader import load_data_for_training
 from src.database.mongodb import mongodb_client
 from config.settings import settings
 
@@ -35,6 +36,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=settings.batch_size, help='Batch size')
     parser.add_argument('--lr', type=float, default=settings.learning_rate, help='Learning rate')
     parser.add_argument('--save-dir', type=str, default=settings.model_save_path, help='Model save directory')
+    parser.add_argument('--data-path', type=str, default='./data/raw/synthetic_data.csv', help='Path to raw data CSV')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device to use for training')
     
@@ -49,17 +51,27 @@ def main():
     logger.info(f"Training configuration: {args}")
     logger.info(f"Using device: {args.device}")
     
-    # In production, load actual training data here
-    # For demonstration, we'll initialize models with placeholder parameters
+    # Load training data
+    logger.info(f"Loading data from {args.data_path}")
+    try:
+        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
+            data_path=args.data_path,
+            test_size=0.2,
+            random_state=42
+        )
+        logger.info(f"Loaded data: train={len(X_train)}, test={len(X_test)}")
+        logger.info(f"Features: {metadata['num_categorical_features']} categorical, "
+                   f"{metadata['num_numerical_features']} numerical")
+    except FileNotFoundError:
+        logger.error(f"Data file not found: {args.data_path}")
+        logger.error("Please run: python generate_raw_data.py")
+        return
     
-    # Placeholder categorical max dictionary
-    cat_max_dict = {i: 100 for i in range(10)}
-    
-    # Create encoder
+    # Create encoder with actual data dimensions
     encoder = Encoder(
-        cnt_cat_features=10,
-        cnt_num_features=10,
-        cat_max_dict=cat_max_dict,
+        cnt_cat_features=metadata['num_categorical_features'],
+        cnt_num_features=metadata['num_numerical_features'],
+        cat_max_dict=metadata['cat_max_dict'],
         d_model=settings.d_model,
         nhead=settings.nhead,
         num_layers=settings.num_layers,

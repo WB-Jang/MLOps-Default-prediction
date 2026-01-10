@@ -11,7 +11,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from src.kafka.producer import kafka_producer
 from src.kafka.consumer import RawDataConsumer
 from src.database.mongodb import mongodb_client
+from src.data.data_loader import DataLoader
+from src.data.preprocessing import prepare_data_for_kafka
 from loguru import logger
+import pandas as pd
 
 
 default_args = {
@@ -26,25 +29,47 @@ default_args = {
 
 
 def ingest_raw_data(**context):
-    """Ingest raw data and send to Kafka."""
+    """Ingest raw data from CSV and send to Kafka."""
     logger.info("Starting data ingestion task")
     
-    # Connect to Kafka producer
-    kafka_producer.connect()
+    # Load raw data from CSV file
+    data_path = "./data/raw/synthetic_data.csv"
+    logger.info(f"Loading raw data from {data_path}")
     
     try:
-        # Example: Load data from source (this should be customized)
-        # For demonstration, creating sample data structure
-        sample_data = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "data_source": "loan_applications",
-            "records": []  # Add actual data records here
-        }
+        loader = DataLoader(data_path)
+        df = loader.load_raw_data()
         
-        # Send to Kafka raw_data topic
-        kafka_producer.send_raw_data(sample_data, key="ingestion")
-        logger.info("Raw data sent to Kafka")
+        # Connect to Kafka producer
+        kafka_producer.connect()
         
+        # Convert data to records format
+        records = prepare_data_for_kafka(df)
+        
+        # Send data in batches to Kafka
+        batch_size = 100
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            batch_data = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "data_source": "loan_applications",
+                "batch_number": i // batch_size,
+                "records": batch
+            }
+            
+            # Send to Kafka raw_data topic
+            kafka_producer.send_raw_data(batch_data, key=f"batch_{i // batch_size}")
+            logger.info(f"Sent batch {i // batch_size} ({len(batch)} records) to Kafka")
+        
+        logger.info(f"Total {len(records)} records sent to Kafka raw_data topic")
+        
+    except FileNotFoundError as e:
+        logger.error(f"Data file not found: {e}")
+        logger.error("Please run: python generate_raw_data.py")
+        raise
+    except Exception as e:
+        logger.error(f"Error during data ingestion: {e}")
+        raise
     finally:
         kafka_producer.disconnect()
 
