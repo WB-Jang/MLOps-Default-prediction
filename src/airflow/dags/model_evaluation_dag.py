@@ -10,7 +10,6 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.database.mongodb import mongodb_client
-from src.kafka.producer import kafka_producer
 from loguru import logger
 
 
@@ -130,42 +129,42 @@ def check_model_performance(**context):
 
 
 def send_evaluation_results(**context):
-    """Send evaluation results to Kafka."""
-    logger.info("Sending evaluation results to Kafka")
+    """Store evaluation results in MongoDB."""
+    logger.info("Storing evaluation results in MongoDB")
     
     # Get evaluation status
     ti = context['ti']
     check_result = ti.xcom_pull(task_ids='check_model_performance')
     model_info = ti.xcom_pull(task_ids='load_latest_model')
     
-    # Connect to Kafka
-    kafka_producer.connect()
+    # Connect to MongoDB
+    mongodb_client.connect()
     
     try:
-        # Send command with evaluation results
-        kafka_producer.send_command({
-            "command": "evaluation_complete",
-            "timestamp": datetime.utcnow().isoformat(),
+        # Store evaluation event
+        mongodb_client.get_collection("evaluation_events").insert_one({
+            "event_type": "evaluation_complete",
+            "timestamp": datetime.utcnow(),
             "model_id": model_info['model_id'],
             "model_version": model_info['model_version'],
             "status": check_result['status'],
             "metrics": check_result['metrics']
-        }, key="evaluation")
+        })
         
-        logger.info("Evaluation results sent to Kafka")
+        logger.info("Evaluation results stored in MongoDB")
         
     finally:
-        kafka_producer.disconnect()
+        mongodb_client.disconnect()
 
 
 # Define DAG
 with DAG(
     'model_evaluation_pipeline',
     default_args=default_args,
-    description='Model evaluation pipeline with MongoDB and Kafka',
+    description='Model evaluation pipeline with MongoDB',
     schedule_interval=timedelta(days=1),
     catchup=False,
-    tags=['evaluation', 'mongodb', 'kafka'],
+    tags=['evaluation', 'mongodb'],
 ) as dag:
     
     # Task 1: Load latest model

@@ -45,18 +45,22 @@ ENV/
 *.pkl
 *.h5
 *.pb
-models/*.pth
+models/*
+!models/.gitkeep
 models/checkpoints/
 
 # Data files
-data/raw/
-data/processed/
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
 *.csv
 *.parquet
 *.json
 
 # Logs
-logs/
+logs/*
+!logs/.gitkeep
 *.log
 
 # Docker

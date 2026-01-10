@@ -14,20 +14,26 @@ This project implements a complete MLOps pipeline with the following components:
    - Contrastive learning pretraining support
    - Models saved in `.pth` format (PyTorch standard)
 
-2. **Kafka Integration**
+2. **Data Generation & Processing**
+   - Synthetic data generation for loan applications
+   - Raw data preprocessing and feature engineering
+   - Categorical and numerical feature handling
+   - Train/test split with stratification
+
+3. **Kafka Integration**
    - **Raw Data Topic**: Receives incoming loan application data
    - **Processed Data Topic**: Distributes preprocessed data ready for training/inference
    - **Commands Topic**: Handles pipeline control commands and events
    - Producers and consumers for data streaming
 
-3. **MongoDB Database**
+4. **MongoDB Database**
    - **Model Metadata**: Stores model versions, hyperparameters, and paths
    - **Performance Metrics**: Tracks model evaluation results
    - **Predictions**: Logs all model predictions with timestamps
    - **Training Logs**: Records training pipeline execution data
 
-4. **Airflow Orchestration**
-   - **Data Ingestion DAG**: Automated data collection via Kafka
+5. **Airflow Orchestration**
+   - **Data Ingestion DAG**: Automated data collection and distribution
    - **Model Training DAG**: End-to-end training pipeline
    - **Model Evaluation DAG**: Automated model evaluation and validation
 
@@ -40,7 +46,9 @@ MLOps-Default-prediction/
 │   │   ├── network.py    # Neural network definitions
 │   │   └── training.py   # Training utilities
 │   ├── data/             # Data processing
-│   │   └── preprocessing.py
+│   │   ├── preprocessing.py          # Data preprocessing utilities
+│   │   ├── data_loader.py            # Data loading utilities
+│   │   └── data_augmentation_generator.py  # SDV-based augmentation
 │   ├── kafka/            # Kafka integration
 │   │   ├── producer.py
 │   │   └── consumer.py
@@ -53,13 +61,19 @@ MLOps-Default-prediction/
 │           └── model_evaluation_dag.py
 ├── config/               # Configuration
 │   └── settings.py
-├── tests/                # Unit tests
-├── docker/               # Docker configurations
+├── data/                 # Data directory
+│   └── raw/             # Raw synthetic data
+│       └── synthetic_data.csv
+├── models/              # Saved model files (.pth)
+├── logs/                # Application logs
+├── tests/               # Unit tests
+├── docker/              # Docker configurations
 │   ├── Dockerfile.airflow
 │   └── Dockerfile.app
-├── docker-compose.yml    # Full stack deployment
+├── docker-compose.yml   # Full stack deployment
 ├── requirements.txt
-├── train.py             # Standalone training script
+├── generate_raw_data.py # Script to generate synthetic data
+├── train.py            # Standalone training script
 └── README.md
 ```
 
@@ -67,130 +81,226 @@ MLOps-Default-prediction/
 
 ### Prerequisites
 
-- Docker and Docker Compose
+- Docker and Docker Compose (for full stack deployment)
 - Python 3.10+
 - 8GB+ RAM recommended
 
-### Quick Start with Docker
+### Quick Start - Complete Pipeline Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/WB-Jang/MLOps-Default-prediction.git
-   cd MLOps-Default-prediction
-   ```
+Follow these steps to set up and run the entire MLOps pipeline:
 
-2. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
+#### 1. Clone and Setup
 
-3. **Start all services**
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **Initialize Airflow (first time only)**
-   ```bash
-   docker-compose run airflow-init
-   ```
-
-5. **Access services**
-   - Airflow UI: http://localhost:8080 (admin/admin)
-   - Kafka: localhost:9092
-   - MongoDB: localhost:27017
-
-### Manual Setup (Development)
-
-1. **Create virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Setup Kafka**
-   ```bash
-   # Using Docker
-   docker run -d --name kafka -p 9092:9092 \
-     -e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
-     confluentinc/cp-kafka:7.5.0
-   ```
-
-4. **Setup MongoDB**
-   ```bash
-   docker run -d --name mongodb -p 27017:27017 \
-     -e MONGO_INITDB_ROOT_USERNAME=admin \
-     -e MONGO_INITDB_ROOT_PASSWORD=changeme \
-     mongo:7.0
-   ```
-
-5. **Setup Airflow**
-   ```bash
-   export AIRFLOW_HOME=~/airflow
-   airflow db init
-   airflow users create --username admin --password admin \
-     --firstname Admin --lastname User --role Admin \
-     --email admin@example.com
-   ```
-
-## Usage
-
-### Training a Model
-
-**Using the standalone script:**
 ```bash
-# Pretrain the encoder
-python train.py --pretrain --epochs 10
+# Clone the repository
+git clone https://github.com/WB-Jang/MLOps-Default-prediction.git
+cd MLOps-Default-prediction
 
-# Train the classifier
-python train.py --train --epochs 20
+# Create necessary directories
+mkdir -p data/raw models logs
+
+# Configure environment (optional)
+cp .env.example .env
+# Edit .env with your configuration if needed
+```
+
+#### 2. Generate Raw Data
+
+**This is the first step and is required for the pipeline to work.**
+
+```bash
+# Generate synthetic loan application data (10,000 rows by default)
+python generate_raw_data.py
+
+# Generate with custom parameters
+python generate_raw_data.py --num-rows 50000 --output-dir ./data/raw
+
+# Generate without target variable (for inference only)
+python generate_raw_data.py --num-rows 10000 --no-target
+
+# View help for all options
+python generate_raw_data.py --help
+```
+
+**Output:**
+- `data/raw/synthetic_data.csv` - Raw loan application data
+- `data/raw/synthetic_data_info.txt` - Dataset statistics and information
+
+**Data Schema:**
+The generated data includes:
+- **Categorical Features (10)**: employment_type, income_category, education_level, credit_score_category, payment_history, loan_purpose, property_type, marital_status, dependents, region
+- **Numerical Features (15)**: annual_income, loan_amount, debt_to_income_ratio, credit_score, existing_debt, employment_length_years, months_at_current_job, loan_term_months, interest_rate, num_credit_lines, num_credit_inquiries, revolving_balance, revolving_utilization, age, months_since_last_delinquency
+- **Target Variable**: default (0 = no default, 1 = default)
+
+#### 3. Option A: Docker Deployment (Recommended for Full Pipeline)
+
+```bash
+# Start all services (Kafka, MongoDB, Airflow)
+docker-compose up -d
+
+# Check service status
+docker-compose ps
+
+# Initialize Airflow (first time only)
+docker-compose run airflow-init
+
+# View logs
+docker-compose logs -f airflow-scheduler
+docker-compose logs -f kafka
+docker-compose logs -f mongodb
+```
+
+**Access Services:**
+- Airflow UI: http://localhost:8080 (username: `admin`, password: `admin`)
+- MongoDB: localhost:27017
+
+**Run the Pipeline via Airflow:**
+
+1. Navigate to Airflow UI (http://localhost:8080)
+2. Enable the DAGs:
+   - `data_ingestion_pipeline` - Loads raw data and stores to MongoDB
+   - `model_training_pipeline` - Trains models end-to-end
+   - `model_evaluation_pipeline` - Evaluates trained models
+3. Trigger DAGs manually or let them run on schedule:
+   - Data Ingestion: Runs hourly
+   - Model Training: Runs daily
+   - Model Evaluation: Runs daily after training
+
+#### 4. Option B: Manual Setup (Development)
+
+**Install Dependencies:**
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**Start Required Services:**
+
+```bash
+# Start MongoDB (in separate terminal)
+docker run -d --name mongodb -p 27017:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=admin \
+  -e MONGO_INITDB_ROOT_PASSWORD=changeme \
+  mongo:7.0
+```
+
+**Train Models Locally:**
+
+```bash
+# Train with generated data (uses data/raw/synthetic_data.csv)
+python train.py --train --epochs 10
+
+# Pretrain encoder only
+python train.py --pretrain --epochs 10
 
 # Both pretraining and training
 python train.py --pretrain --train --epochs 10
+
+# Train with custom data path
+python train.py --train --data-path ./data/raw/custom_data.csv --epochs 20
+
+# View all training options
+python train.py --help
 ```
 
-**Using Airflow:**
-1. Navigate to Airflow UI (http://localhost:8080)
-2. Enable the `model_training_pipeline` DAG
-3. Trigger the DAG manually or let it run on schedule
+**Training Output:**
+- Models saved to `./models/` directory
+- `pretrained_encoder_YYYYMMDD_HHMMSS.pth` - Pretrained encoder
+- `classifier_YYYYMMDD_HHMMSS.pth` - Trained classifier
+- Training logs in `./logs/` directory
 
-### Data Ingestion
+## Complete Pipeline Workflow
 
-**Send data to Kafka:**
-```python
-from src.kafka.producer import kafka_producer
+### Data Flow Diagram
 
-kafka_producer.connect()
-kafka_producer.send_raw_data({
-    "loan_id": "12345",
-    "features": {...}
-})
-kafka_producer.disconnect()
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. DATA GENERATION                                              │
+│    python generate_raw_data.py                                  │
+│    └─> data/raw/synthetic_data.csv                             │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. DATA INGESTION                                               │
+│    Airflow DAG: data_ingestion_pipeline                         │
+│    └─> Loads CSV → Stores to MongoDB raw_data collection       │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. DATA PROCESSING                                              │
+│    DAG processes raw data → MongoDB processed_data collection   │
+│    └─> Normalizes features, encodes categoricals               │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 4. MODEL TRAINING                                               │
+│    Airflow DAG: model_training_pipeline                         │
+│    ├─> Loads data from CSV or MongoDB                          │
+│    ├─> Pretrain encoder (contrastive learning)                 │
+│    ├─> Train classifier (supervised)                            │
+│    ├─> Save models to ./models/*.pth                            │
+│    └─> Store metadata in MongoDB                                │
+└────────────────────┬────────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 5. MODEL EVALUATION                                             │
+│    Airflow DAG: model_evaluation_pipeline                       │
+│    ├─> Load latest model from MongoDB                           │
+│    ├─> Evaluate on test set                                     │
+│    └─> Store metrics in MongoDB                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Using Airflow DAG:**
-- The `data_ingestion_pipeline` DAG runs hourly
-- Automatically processes data from Kafka topics
+### Step-by-Step Execution
 
-### Model Inference
+**1. Generate Raw Data:**
+```bash
+python generate_raw_data.py --num-rows 10000
+```
 
+**2. Start Services:**
+```bash
+docker-compose up -d
+```
+
+**3. Trigger Pipeline via Airflow UI or CLI:**
+```bash
+# Using Airflow CLI (if installed)
+airflow dags trigger data_ingestion_pipeline
+airflow dags trigger model_training_pipeline
+airflow dags trigger model_evaluation_pipeline
+```
+
+**4. Monitor Pipeline:**
+- Check Airflow UI for DAG execution status
+- View logs in `./logs/` directory
+- Query MongoDB for model metadata and metrics
+
+**5. Use Trained Models:**
 ```python
 import torch
-from src.models import TabTransformerClassifier, load_model
+from src.models import TabTransformerClassifier
 from src.database.mongodb import mongodb_client
 
-# Get latest model from MongoDB
+# Connect to MongoDB
 mongodb_client.connect()
+
+# Get latest model metadata
 model_metadata = mongodb_client.get_model_metadata("default_prediction_classifier")
 
 # Load model
-model = TabTransformerClassifier(...)
-model = load_model(model, model_metadata['model_path'])
+model = TabTransformerClassifier(...)  # Initialize with saved hyperparameters
+checkpoint = torch.load(model_metadata['model_path'])
+model.load_state_dict(checkpoint['model_state_dict'])
 
 # Make predictions
 model.eval()
@@ -198,53 +308,80 @@ with torch.no_grad():
     predictions = model(x_cat, x_num)
 ```
 
-## Kafka Topics
+## Configuration
 
-### Raw Data Topic
-- **Name**: `raw_data`
-- **Purpose**: Receives incoming loan application data
-- **Schema**: JSON with loan features
+### Environment Variables
 
-### Processed Data Topic
-- **Name**: `processed_data`
-- **Purpose**: Distributes preprocessed, training-ready data
-- **Schema**: JSON with normalized features
+Edit `.env` file or set environment variables:
 
-### Commands Topic
-- **Name**: `commands`
-- **Purpose**: Pipeline control and event notifications
-- **Events**: `training_complete`, `evaluation_complete`, etc.
+```bash
+# MongoDB Configuration
+MONGODB_HOST=localhost
+MONGODB_PORT=27017
+MONGODB_DATABASE=mlops_default_prediction
 
-## MongoDB Collections
+# Model Configuration
+MODEL_SAVE_PATH=./models
+D_MODEL=32
+NHEAD=4
+NUM_LAYERS=6
+DIM_FEEDFORWARD=64
+DROPOUT_RATE=0.3
 
-### model_metadata
-Stores model version information and hyperparameters.
+# Training Configuration
+BATCH_SIZE=32
+LEARNING_RATE=0.0003
+EPOCHS=10
+```
 
-### performance_metrics
-Records model evaluation metrics on different datasets.
+### Modifying Model Hyperparameters
 
-### predictions
-Logs all model predictions for monitoring and analysis.
+Edit `config/settings.py` or set environment variables before training:
 
-### training_data
-Tracks training data batches and preprocessing status.
+```bash
+# Example: Train with larger model
+export D_MODEL=64
+export NUM_LAYERS=8
+export EPOCHS=20
+python train.py --train
+```
 
-## Model File Format
+## Data Generation Details
 
-All models are saved in PyTorch's `.pth` format:
+### Using the Data Augmentation Generator
+
+The project includes `src/data/data_augmentation_generator.py` for SDV-based data generation (requires trained distribution model):
 
 ```python
-# Saving
-torch.save({
-    'model_state_dict': model.state_dict(),
-    'optimizer_state_dict': optimizer.state_dict(),
-    'epoch': epoch,
-    'metrics': metrics
-}, 'model.pth')
+from sdv.single_table import GaussianCopulaSynthesizer
+import pandas as pd
 
-# Loading
-checkpoint = torch.load('model.pth')
-model.load_state_dict(checkpoint['model_state_dict'])
+# Load pre-trained synthesizer
+synthesizer = GaussianCopulaSynthesizer.load('./distribution_model.pkl')
+
+# Generate synthetic data
+synthetic_data = synthesizer.sample(num_rows=10000)
+synthetic_data.to_csv('./data/raw/synthetic_data.csv', index=False, encoding='utf-8-sig')
+```
+
+**Note:** The `generate_raw_data.py` script provides a simpler, self-contained approach that doesn't require a pre-trained SDV model.
+
+### Custom Data Integration
+
+To use your own data instead of synthetic data:
+
+1. Prepare CSV file with same schema as `synthetic_data.csv`
+2. Place in `data/raw/` directory
+3. Update `--data-path` argument when training:
+
+```bash
+python train.py --train --data-path ./data/raw/your_data.csv
+```
+
+Or update data path in DAG files:
+```python
+# In src/airflow/dags/data_ingestion_dag.py
+data_path = "./data/raw/your_data.csv"
 ```
 
 ## Testing
@@ -257,87 +394,123 @@ pytest tests/
 
 # Specific test file
 pytest tests/test_kafka.py
+pytest tests/test_models.py
+pytest tests/test_mongodb.py
 
-# With coverage
+# With coverage report
 pytest --cov=src tests/
+
+# Verbose output
+pytest -v tests/
 ```
-
-## Configuration
-
-Edit `config/settings.py` or set environment variables:
-
-```bash
-# MongoDB
-MONGODB_HOST=localhost
-MONGODB_PORT=27017
-MONGODB_DATABASE=mlops_default_prediction
-
-# Kafka
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-KAFKA_RAW_DATA_TOPIC=raw_data
-KAFKA_PROCESSED_DATA_TOPIC=processed_data
-KAFKA_COMMANDS_TOPIC=commands
-
-# Model
-MODEL_SAVE_PATH=./models
-D_MODEL=32
-NHEAD=4
-NUM_LAYERS=6
-```
-
-## Deployment
-
-### Production Deployment
-
-1. **Update environment variables** for production settings
-2. **Scale Kafka brokers** for high throughput
-3. **Configure MongoDB replica set** for high availability
-4. **Use Kubernetes** for Airflow workers (optional)
-5. **Setup monitoring** with Prometheus/Grafana
-
-### Scaling Considerations
-
-- **Kafka**: Add more brokers and partitions for parallel processing
-- **MongoDB**: Use sharding for large-scale data
-- **Airflow**: Use CeleryExecutor with multiple workers
-- **Model Serving**: Deploy model behind API gateway (FastAPI/Flask)
 
 ## Troubleshooting
 
-### Kafka Connection Issues
+### Common Issues
+
+**1. Data file not found**
 ```bash
-# Check Kafka is running
-docker ps | grep kafka
-
-# View Kafka logs
-docker logs kafka
+FileNotFoundError: Data file not found: ./data/raw/synthetic_data.csv
 ```
+**Solution:** Run `python generate_raw_data.py` to generate the data file.
 
-### MongoDB Connection Issues
+**2. MongoDB connection issues**
 ```bash
 # Check MongoDB is running
 docker ps | grep mongodb
 
 # Test connection
-mongo mongodb://admin:changeme@localhost:27017
+docker exec -it mongodb mongosh
 ```
 
-### Airflow DAG Issues
+**3. Airflow DAG not appearing**
 ```bash
 # Check DAG syntax
-python src/airflow/dags/model_training_dag.py
+python src/airflow/dags/data_ingestion_dag.py
 
-# View Airflow logs
-docker logs airflow-scheduler
+# Refresh DAGs in UI
+# Airflow UI -> DAGs -> Refresh button
+
+# View scheduler logs
+docker-compose logs airflow-scheduler
 ```
+
+### Viewing Logs
+
+```bash
+# Application logs
+tail -f logs/training_*.log
+tail -f logs/data_generation_*.log
+
+# Docker service logs
+docker-compose logs -f airflow-scheduler
+docker-compose logs -f airflow-webserver
+docker-compose logs -f mongodb
+```
+
+### Cleaning Up
+
+```bash
+# Stop all services
+docker-compose down
+
+# Remove volumes (WARNING: deletes all data)
+docker-compose down -v
+
+# Clean generated data and models
+rm -rf data/raw/*.csv models/*.pth logs/*.log
+```
+
+## Advanced Usage
+
+### Accessing MongoDB Data
+
+```bash
+# Connect to MongoDB (if using Docker)
+docker exec -it mongodb mongosh
+
+# View collections
+use mlops_default_prediction
+show collections
+
+# Query data
+db.raw_data.find().limit(5)
+db.model_metadata.find().pretty()
+db.training_events.find().sort({timestamp: -1}).limit(10)
+db.evaluation_events.find().sort({timestamp: -1}).limit(10)
+```
+
+## Deployment
+
+### Production Deployment Checklist
+
+1. **Update environment variables** for production
+2. **Configure MongoDB replica set** for high availability
+3. **Scale Kafka brokers** for higher throughput
+4. **Use Kubernetes** for Airflow workers (optional)
+5. **Setup monitoring** with Prometheus/Grafana
+6. **Enable authentication** on all services
+7. **Configure backups** for MongoDB and models
+8. **Setup CI/CD pipeline** for automated deployment
+
+### Scaling Considerations
+
+- **Kafka**: Add brokers and increase partition count
+- **MongoDB**: Use sharding for large datasets
+- **Airflow**: Use CeleryExecutor with multiple workers
+- **Model Serving**: Deploy behind API gateway (FastAPI/Flask)
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/your-feature`)
+3. Generate test data: `python generate_raw_data.py`
+4. Make your changes
+5. Add tests for new functionality
+6. Run tests: `pytest tests/`
+7. Commit your changes (`git commit -am 'Add new feature'`)
+8. Push to the branch (`git push origin feature/your-feature`)
+9. Submit a pull request
 
 ## License
 
@@ -345,4 +518,12 @@ This project is licensed under the MIT License.
 
 ## Contact
 
-For questions or issues, please open a GitHub issue.
+For questions or issues, please open a GitHub issue or contact the maintainers.
+
+## Additional Resources
+
+- [PyTorch Documentation](https://pytorch.org/docs/)
+- [Apache Kafka Documentation](https://kafka.apache.org/documentation/)
+- [Apache Airflow Documentation](https://airflow.apache.org/docs/)
+- [MongoDB Documentation](https://docs.mongodb.com/)
+- [Tab Transformer Paper](https://arxiv.org/abs/2012.06678)
