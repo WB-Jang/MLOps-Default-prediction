@@ -4,12 +4,13 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict
 from loguru import logger
+from sklearn.preprocessing import LabelEncoder
+from datetime import datetime
 
-
-class DataLoader:
-    """Load and manage raw data for the pipeline."""
+class DataGenLoaderProcessor:
+    """Generate and Load and manage raw data for the pipeline."""
     
-    def __init__(self, data_path: str = "./data/raw/synthetic_data.csv"):
+    def __init__(self, data_path: str = "synthetic_data.csv"):
         """
         Initialize data loader.
         
@@ -20,6 +21,11 @@ class DataLoader:
         self.df: Optional[pd.DataFrame] = None
         self.categorical_columns: List[str] = []
         self.numerical_columns: List[str] = []
+        
+    def data_generation(self, data_quantity: int = 10000):
+        synthesizer = GaussianCopulaSynthesizer.load('distribution_model.pkl')
+        synthetic_data = synthesizer.sample(data_quantity)
+        synthetic_data.to_csv(self.data_path,index=False, encoding='utf-8-sig')
         
     def load_raw_data(self) -> pd.DataFrame:
         """
@@ -37,33 +43,75 @@ class DataLoader:
         logger.info(f"Loading raw data from {self.data_path}")
         self.df = pd.read_csv(self.data_path)
         logger.info(f"Loaded {len(self.df)} rows with {len(self.df.columns)} columns")
-        
-        # Auto-detect categorical and numerical columns
-        self._detect_column_types()
-        
+                      
         return self.df
+
+    def IsNull_cols(self):
+        if not self.df:
+            raise FileNotFoundError(
+                f"df not found"
+            )
+        null_columns = self.df.columns[self.df.isnull().any()]
+        print(f'null 값이 있는 컬럼 리스트 : {null_columns}')
+        for col in null_columns:
+            new_column = f'{col}_isnull'
+            self.df[new_column] = self.df[col].isnull().map(lambda x:'Null' if x else 'Notnull')
+        print('---IsNull 컬럼 생성 완료---')
+        return self.df
+
+    def obj_cols(self):
+        if not self.df:
+            raise FileNotFoundError(
+                f"df not found"
+            )
+        object_dtype_list = self.df.select_dtypes(include='object').columns.tolist()
+        object_dtype_list.append('acct_titl_cd')
+        print(f'object 형식인 컬럼 리스트 : {object_dtype_list}')
+        
+        for column in object_dtype_list:
+            self.df[column] = self.df[column].astype('string')
+        print('---object 형식을 str 형식으로 변경 완료---')
+        self.df['corp_estblsh_day'].unique()
+        return self.df       
+        
     
-    def _detect_column_types(self) -> None:
-        """Detect categorical and numerical columns automatically."""
-        if self.df is None:
-            raise RuntimeError("Data not loaded. Call load_raw_data() first.")
+    def dt_data_handling(self):
+        dt_list = ['STD_DATE_NEW','init_loan_dt','loan_deadln_dt']
+        dt_list_2 = ['corp_estblsh_day','init_regist_dt','lst_renew_dt']
         
-        # Exclude ID and target columns
-        exclude_cols = ['loan_id', 'default']
+        for dt_col in dt_list:
+            self.df[dt_col] = pd.to_datetime(self.df[dt_col].str.title(), format='%d%b%Y', errors='coerce') # Null 값은 그대로 놔둠
+            print(f"{dt_col}이 날짜 형식으로 변환 완료되었습니다")
+        for dt_col in dt_list_2:
+            self.df[dt_col] = pd.to_datetime(self.df[dt_col], format='%d%b%Y',errors='coerce') # Null 값은 그대로 놔둠
+            print(f"{dt_col}이 날짜 형식으로 변환 완료되었습니다")
         
-        for col in self.df.columns:
-            if col in exclude_cols:
-                continue
-            
-            # Check if column is categorical (object type or few unique values)
-            if self.df[col].dtype == 'object' or self.df[col].nunique() < 20:
-                self.categorical_columns.append(col)
-            else:
-                self.numerical_columns.append(col)
+        self.df['corp_estblsh_day'].fillna(pd.Timestamp('2024-01-01'), inplace=True)
         
-        logger.info(f"Detected {len(self.categorical_columns)} categorical columns")
-        logger.info(f"Detected {len(self.numerical_columns)} numerical columns")
-    
+        reference = pd.Timestamp('2024-01-01')
+        print(reference)
+        print(type(reference))
+        
+        self.df['cnt_days_since_0101'] = (self.df['STD_DATE_NEW'] - reference).dt.days
+        self.df['cnt_days_from_init'] = (self.df['STD_DATE_NEW'] - self.df['init_loan_dt']).dt.days
+        self.df['cnt_days_until_dead'] = (self.df['loan_deadln_dt'] - self.df['STD_DATE_NEW']).dt.days
+        self.df['cnt_days_total'] = (self.df['loan_deadln_dt'] - self.df['init_loan_dt']).dt.days
+        # raw_copied['cnt_days_estblsh'] = (self.df['STD_DATE_NEW'] - self.df['corp_estblsh_day']).dt.days
+        self.df['cnt_days_regist'] = (self.df['STD_DATE_NEW'] - self.df['init_regist_dt']).dt.days
+        self.df['cnt_days_renew'] = (self.df['STD_DATE_NEW'] - self.df['lst_renew_dt']).dt.days
+        return self.df
+
+    def data_shrinkage(self):
+        self.df.drop(columns=dt_list,inplace=True)
+        self.df.drop(columns=['AF_CRG','AF_KIFRS_ADJ_NRML','AF_KIFRS_ADJ_SM','AF_KIFRS_ADJ_FXD_UNDER','AF_NRML_RATIO',\
+                                 'AF_SM_RATIO','AF_FXD_UNDER_RATIO','AF_ASSET_QUALITY','AF_DLNQNCY_DAY_CNT','AF_BNKRUT_CORP_FLG',\
+                                'AF_BOND_ADJUST_FLG','AF_NO_PRFT_LOAN_MK','AF_NO_PRFT_LOAN_CAND_FLG','QUAL_CHG','NRML_CHG','SM_CHG','FXD_UNDER_CHG'],inplace=True)
+        self.df.drop(columns=['BF_CRG','BF_KIFRS_ADJ_NRML','BF_KIFRS_ADJ_SM','BF_KIFRS_ADJ_FXD_UNDER','BF_NRML_RATIO',\
+                                 'BF_SM_RATIO','BF_FXD_UNDER_RATIO','BF_ASSET_QUALITY','BF_DLNQNCY_DAY_CNT','BF_BNKRUT_CORP_FLG',\
+                                'BF_BOND_ADJUST_FLG','BF_NO_PRFT_LOAN_MK','BF_NO_PRFT_LOAN_CAND_FLG'],inplace=True)
+        return self.df
+#여기까지 검토 완료
+        
     def encode_categorical_columns(self) -> Dict[str, Dict]:
         """
         Encode categorical columns as integers.
