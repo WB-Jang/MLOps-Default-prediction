@@ -20,19 +20,13 @@ This project implements a complete MLOps pipeline with the following components:
    - Categorical and numerical feature handling
    - Train/test split with stratification
 
-3. **Kafka Integration**
-   - **Raw Data Topic**: Receives incoming loan application data
-   - **Processed Data Topic**: Distributes preprocessed data ready for training/inference
-   - **Commands Topic**: Handles pipeline control commands and events
-   - Producers and consumers for data streaming
-
-4. **MongoDB Database**
+3. **MongoDB Database**
    - **Model Metadata**: Stores model versions, hyperparameters, and paths
    - **Performance Metrics**: Tracks model evaluation results
    - **Predictions**: Logs all model predictions with timestamps
    - **Training Logs**: Records training pipeline execution data
 
-5. **Airflow Orchestration**
+4. **Airflow Orchestration**
    - **Data Ingestion DAG**: Automated data collection and distribution
    - **Model Training DAG**: End-to-end training pipeline
    - **Model Evaluation DAG**: Automated model evaluation and validation
@@ -61,10 +55,6 @@ MLOps-Default-prediction/
 │           └── model_evaluation_dag.py
 ├── config/               # Configuration
 │   └── settings.py
-├── data/                 # Data directory
-│   └── raw/             # Raw synthetic data
-│       └── synthetic_data.csv
-├── models/              # Saved model files (.pth)
 ├── logs/                # Application logs
 ├── tests/               # Unit tests
 ├── docker/              # Docker configurations
