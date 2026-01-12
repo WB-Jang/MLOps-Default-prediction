@@ -4,10 +4,9 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict
 from loguru import logger
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, RobustScaler
 from datetime import datetime
 from sklearn.impute import SimpleImputer
-import numpy as np
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 import torch
@@ -53,8 +52,8 @@ class DataGenLoaderProcessor:
         return self.df
 
     def IsNull_cols(self):
-        if not self.df:
-            raise FileNotFoundError(
+        if self.df is None:
+            raise RuntimeError(
                 f"df not found"
             )
         null_columns = self.df.columns[self.df.isnull().any()]
@@ -66,8 +65,8 @@ class DataGenLoaderProcessor:
         return self.df
 
     def obj_cols(self):
-        if not self.df:
-            raise FileNotFoundError(
+        if self.df is None:
+            raise RuntimeError(
                 f"df not found"
             )
         object_dtype_list = self.df.select_dtypes(include='object').columns.tolist()
@@ -167,8 +166,6 @@ class DataGenLoaderProcessor:
         num_data_imputed = imputer.fit_transform(num_data)
         raw_labeled[num_col_list] = num_data_imputed
         print('---결측치 최빈값으로 보간 완료---')
-        import pandas as pd
-        from sklearn.preprocessing import RobustScaler
         
         # 로버스트 스케일러 초기화 (중앙값과 IQR을 사용)
         scaler = RobustScaler()
