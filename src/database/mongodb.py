@@ -6,6 +6,7 @@ from bson import ObjectId
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from loguru import logger
+import gridfs 
 
 from config.settings import settings
 
@@ -17,12 +18,14 @@ class MongoDBClient:
         """Initialize MongoDB client."""
         self.client: Optional[MongoClient] = None
         self.db: Optional[Database] = None
+        self.fs: Optional[Database] = None
         
     def connect(self) -> None:
         """Establish connection to MongoDB."""
         try:
             self.client = MongoClient(settings.mongodb_connection_string)
             self.db = self.client[settings.mongodb_database]
+            self.fs = gridfs.GridFS(self.db)
             # Test connection
             self.client.server_info()
             logger.info(f"Connected to MongoDB: {settings.mongodb_database}")
@@ -49,7 +52,49 @@ class MongoDBClient:
         if not self.db:
             raise RuntimeError("Database not connected. Call connect() first.")
         return self.db[collection_name]
-    
+    def upload_model_file(self, file_path: str, model_name: str, version: str) -> str:
+        """
+        로컬에 있는 모델 파일(.pth)을 읽어서 MongoDB GridFS에 저장
+        """
+        filename = f"{model_name}_{version}.pth"
+        
+        with open(file_path, 'rb') as f:
+            # put() 메서드로 파일 저장
+            file_id = self.fs.put(
+                f, 
+                filename=filename, 
+                metadata={
+                    "type": "model", 
+                    "model_name": model_name, 
+                    "version": version
+                }
+            )
+        logger.info(f"Model file uploaded to GridFS. ID: {file_id}")
+        return str(file_id)
+    def download_model_file(self, file_id: str, download_path: str):
+        """
+        MongoDB GridFS에서 모델 파일을 다운로드하여 로컬에 저장
+        """
+        try:
+            grid_out = self.fs.get(ObjectId(file_id))
+            with open(download_path, 'wb') as f:
+                f.write(grid_out.read())
+            logger.info(f"Model downloaded to {download_path}")
+        except Exception as e:
+            logger.error(f"Failed to download model: {e}")
+
+    def upload_raw_data(self, file_path: str, dataset_name: str) -> str:
+        """
+        대용량 Raw Data(CSV)를 GridFS에 저장
+        """
+        with open(file_path, 'rb') as f:
+            file_id = self.fs.put(
+                f, 
+                filename=file_path.split('/')[-1],
+                metadata={"type": "raw_data", "dataset": dataset_name}
+            )
+        return str(file_id)
+        
     def store_model_metadata(
         self,
         model_name: str,
