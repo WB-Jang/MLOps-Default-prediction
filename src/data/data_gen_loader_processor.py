@@ -222,7 +222,7 @@ def load_data_for_training(
     loader.data_shrinkage()
     
     # Get processed data and metadata
-    raw_scaled, str_col_list_less_target, num_col_list, cat_max_dict = loader.detecting_type_encoding()
+    raw_scaled, str_col_list_less_target, num_col_list, nunique_str = loader.detecting_type_encoding()
     
     # Get train/test split
     train_df, temp_df = train_test_split(
@@ -261,7 +261,7 @@ def load_data_for_training(
     metadata = {
         'categorical_columns': str_col_list_less_target,
         'numerical_columns': num_col_list,
-        'cat_max_dict': cat_max_dict,
+        'cat_max_dict': nunique_str,
         'num_categorical_features': len(str_col_list_less_target),
         'num_numerical_features': len(num_col_list),
     }
