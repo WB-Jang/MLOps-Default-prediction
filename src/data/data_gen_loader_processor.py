@@ -6,6 +6,11 @@ from typing import Tuple, List, Optional, Dict
 from loguru import logger
 from sklearn.preprocessing import LabelEncoder
 from datetime import datetime
+from sklearn.impute import SimpleImputer
+import numpy as np
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+import torch
 
 class DataGenLoaderProcessor:
     """Generate and Load and manage raw data for the pipeline."""
@@ -19,6 +24,7 @@ class DataGenLoaderProcessor:
         """
         self.data_path = Path(data_path)
         self.df: Optional[pd.DataFrame] = None
+        self.scaled_df: Optional[pd.DataFrame] = None
         self.categorical_columns: List[str] = []
         self.numerical_columns: List[str] = []
         
@@ -110,125 +116,68 @@ class DataGenLoaderProcessor:
                                  'BF_SM_RATIO','BF_FXD_UNDER_RATIO','BF_ASSET_QUALITY','BF_DLNQNCY_DAY_CNT','BF_BNKRUT_CORP_FLG',\
                                 'BF_BOND_ADJUST_FLG','BF_NO_PRFT_LOAN_MK','BF_NO_PRFT_LOAN_CAND_FLG'],inplace=True)
         return self.df
-#여기까지 검토 완료
+
+    def detecting_type_encoding(self):
+        num_col_list = self.df.select_dtypes(include=['float64','int64']).columns.tolist()
+        str_col_list = self.df.select_dtypes(include='string').columns.tolist()
         
-    def encode_categorical_columns(self) -> Dict[str, Dict]:
-        """
-        Encode categorical columns as integers.
+        str_col_list_less_target = []
+        for col in str_col_list:
+            if col != 'DLNQ_1M_FLG':
+                str_col_list_less_target.append(col)
         
-        Returns:
-            Dictionary mapping column names to encoding dictionaries
-        """
-        if self.df is None:
-            raise RuntimeError("Data not loaded. Call load_raw_data() first.")
+        print(f"수치형 컬럼은 총 {len(num_col_list)}개 입니다")
+        print(f"범주형 컬럼은 총 {len(str_col_list_less_target)}개 입니다")
+
+        raw_labeled_v1=self.df.copy()
         
-        encoding_maps = {}
+        for col in str_col_list:
+            raw_labeled_v1[col][raw_labeled_v1[col].isnull()] = 'NA'
         
-        for col in self.categorical_columns:
-            if self.df[col].dtype == 'object':
-                # Create encoding map
-                unique_values = sorted(self.df[col].unique())
-                encoding_map = {val: idx for idx, val in enumerate(unique_values)}
-                encoding_maps[col] = encoding_map
-                
-                # Apply encoding
-                self.df[col] = self.df[col].map(encoding_map)
-                logger.debug(f"Encoded {col}: {len(encoding_map)} unique values")
+        raw_labeled_v1['biz_gb'] = raw_labeled_v1['biz_gb'].str[:3]
+        print(raw_labeled_v1['biz_gb'].unique())
         
-        return encoding_maps
-    
-    def get_features_and_target(
-        self,
-        encode_categoricals: bool = True
-    ) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        Get features and target variable.
+        raw_labeled_v1['biz_gb'] = raw_labeled_v1['biz_gb'].str.lower()
+        for col in str_col_list:
+            print(raw_labeled_v1[col].unique())
         
-        Args:
-            encode_categoricals: Whether to encode categorical variables
-            
-        Returns:
-            Tuple of (features_df, target_series)
-        """
-        if self.df is None:
-            self.load_raw_data()
         
-        # Encode if needed
-        if encode_categoricals:
-            self.encode_categorical_columns()
+        # LabelEncoder를 보관할 딕셔너리 (각 컬럼별로 학습된 encoder를 저장)
+        raw_labeled = raw_labeled_v1.copy()
+        encoders = {}
+        # 각 범주형 컬럼에 대해 LabelEncoder로 변환
+        for col in str_col_list:
+            le = LabelEncoder()
+            raw_labeled[col] = le.fit_transform(raw_labeled_v1[col])
+            encoders[col] = le
         
-        # Separate features and target
-        if 'default' in self.df.columns:
-            target = self.df['default']
-            features = self.df.drop(columns=['loan_id', 'default'], errors='ignore')
-        else:
-            target = None
-            features = self.df.drop(columns=['loan_id'], errors='ignore')
+        nunique_str = {}
+        for i, c in enumerate(str_col_list_less_target):
+            num_str = raw_labeled[c].max() + 1  # 라벨 인코딩 이후 각 컬럼별 value들 중 최대값 + 1 
+            nunique_str[i] = num_str
+        print(nunique_str)
+
+        # 예시: 평균 대체
+        #imputer = SimpleImputer(strategy="median") # "mean", "median", "most_frequent", "constant" 옵션 존재
+        imputer = SimpleImputer(strategy="most_frequent")
+        # fit_transform으로 결측치 보간
+        num_data = raw_labeled[num_col_list].values 
         
-        return features, target
-    
-    def get_categorical_max_dict(self) -> Dict[int, int]:
-        """
-        Get the maximum value for each categorical feature (for embedding size).
+        num_data_imputed = imputer.fit_transform(num_data)
+        raw_labeled[num_col_list] = num_data_imputed
+        print('---결측치 최빈값으로 보간 완료---')
+        import pandas as pd
+        from sklearn.preprocessing import RobustScaler
         
-        Returns:
-            Dictionary mapping feature index to max value + 1
-        """
-        if self.df is None:
-            raise RuntimeError("Data not loaded. Call load_raw_data() first.")
+        # 로버스트 스케일러 초기화 (중앙값과 IQR을 사용)
+        scaler = RobustScaler()
         
-        cat_max_dict = {}
-        for idx, col in enumerate(self.categorical_columns):
-            cat_max_dict[idx] = int(self.df[col].max()) + 1
+        raw_scaled = raw_labeled.copy()
+        raw_scaled[num_col_list] = scaler.fit_transform(raw_labeled[num_col_list])
+        self.scaled_df = raw_scaled
+        print('---Robust Scaling completed---')
+        return self.scaled_df
         
-        return cat_max_dict
-    
-    def train_test_split(
-        self,
-        test_size: float = 0.2,
-        random_state: int = 42
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """
-        Split data into train and test sets.
-        
-        Args:
-            test_size: Proportion of data for test set
-            random_state: Random seed for reproducibility
-            
-        Returns:
-            Tuple of (X_train, X_test, y_train, y_test)
-        """
-        from sklearn.model_selection import train_test_split
-        
-        X, y = self.get_features_and_target(encode_categoricals=True)
-        
-        if y is None:
-            raise ValueError("Cannot split: target variable 'default' not found")
-        
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state, stratify=y
-        )
-        
-        logger.info(f"Train set: {len(X_train)} samples")
-        logger.info(f"Test set: {len(X_test)} samples")
-        
-        return X_train, X_test, y_train, y_test
-    
-    def get_column_lists(self) -> Tuple[List[str], List[str]]:
-        """
-        Get lists of categorical and numerical column names.
-        
-        Returns:
-            Tuple of (categorical_columns, numerical_columns)
-        """
-        if not self.categorical_columns or not self.numerical_columns:
-            if self.df is None:
-                self.load_raw_data()
-            else:
-                self._detect_column_types()
-        
-        return self.categorical_columns, self.numerical_columns
-    
     def save_processed_data(self, output_path: str) -> None:
         """
         Save processed data to CSV.
@@ -236,16 +185,15 @@ class DataGenLoaderProcessor:
         Args:
             output_path: Path to save the processed data
         """
-        if self.df is None:
+        if self.scaled_df is None:
             raise RuntimeError("Data not loaded. Call load_raw_data() first.")
         
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        self.df.to_csv(output_path, index=False)
+        self.scaled_df.to_csv(output_path, index=False)
         logger.info(f"Saved processed data to {output_path}")
-
-
+    
 def load_data_for_training(
     data_path: str = "./data/raw/synthetic_data.csv",
     test_size: float = 0.2,
@@ -266,11 +214,35 @@ def load_data_for_training(
     loader.load_raw_data()
     
     # Get train/test split
-    X_train, X_test, y_train, y_test = loader.train_test_split(
+    train_df, temp_df = train_test_split(
+        raw_scaled,
         test_size=test_size,
-        random_state=random_state
+        random_state=random_state,
+        stratify=raw_scaled["DLNQ_1M_FLG"]
     )
+        
+    # Step 2: temp → fine_tune(15%) + test(15%) 분할
+    fine_df, test_df = train_test_split(
+        temp_df,
+        fine_size=fine_size,  # 50% of 20% = 10% of original
+        random_state=42,
+        stratify=temp_df["DLNQ_1M_FLG"]
+    )
+                   
+    X_train_str = train_df[str_col_list_less_target].values  # (행, 50)
+    X_train_num = train_df[num_col_list].values  # (행, 45)
+    y_train = train_df["DLNQ_1M_FLG"].values
     
+    X_fine_str = fine_df[str_col_list_less_target].values
+    X_fine_num = fine_df[num_col_list].values
+    y_fine = fine_df["DLNQ_1M_FLG"].values
+    
+    X_test_str = test_df[str_col_list_less_target].values
+    X_test_num = test_df[num_col_list].values
+    y_test = test_df["DLNQ_1M_FLG"].values
+    
+    print("Train size:", len(train_df), "Fine size:", len(fine_df),"Test size:", len(test_df))
+            
     # Get metadata
     cat_cols, num_cols = loader.get_column_lists()
     cat_max_dict = loader.get_categorical_max_dict()
@@ -282,5 +254,4 @@ def load_data_for_training(
         'num_categorical_features': len(cat_cols),
         'num_numerical_features': len(num_cols),
     }
-    
-    return (X_train, y_train), (X_test, y_test), metadata
+    return X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, metadata
