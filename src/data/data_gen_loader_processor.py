@@ -108,6 +108,7 @@ class DataGenLoaderProcessor:
         return self.df
 
     def data_shrinkage(self):
+        dt_list = ['STD_DATE_NEW','init_loan_dt','loan_deadln_dt']
         self.df.drop(columns=dt_list,inplace=True)
         self.df.drop(columns=['AF_CRG','AF_KIFRS_ADJ_NRML','AF_KIFRS_ADJ_SM','AF_KIFRS_ADJ_FXD_UNDER','AF_NRML_RATIO',\
                                  'AF_SM_RATIO','AF_FXD_UNDER_RATIO','AF_ASSET_QUALITY','AF_DLNQNCY_DAY_CNT','AF_BNKRUT_CORP_FLG',\
@@ -176,7 +177,7 @@ class DataGenLoaderProcessor:
         raw_scaled[num_col_list] = scaler.fit_transform(raw_labeled[num_col_list])
         self.scaled_df = raw_scaled
         print('---Robust Scaling completed---')
-        return self.scaled_df
+        return self.scaled_df, str_col_list_less_target, num_col_list, nunique_str
         
     def save_processed_data(self, output_path: str) -> None:
         """
@@ -210,8 +211,18 @@ def load_data_for_training(
     Returns:
         Tuple of ((X_train, y_train), (X_test, y_test), metadata)
     """
-    loader = DataLoader(data_path)
+    # Initialize the data processor
+    loader = DataGenLoaderProcessor(data_path)
     loader.load_raw_data()
+    
+    # Execute the processing pipeline
+    loader.IsNull_cols()
+    loader.obj_cols()
+    loader.dt_data_handling()
+    loader.data_shrinkage()
+    
+    # Get processed data and metadata
+    raw_scaled, str_col_list_less_target, num_col_list, cat_max_dict = loader.detecting_type_encoding()
     
     # Get train/test split
     train_df, temp_df = train_test_split(
@@ -220,17 +231,20 @@ def load_data_for_training(
         random_state=random_state,
         stratify=raw_scaled["DLNQ_1M_FLG"]
     )
+    
+    # Define fine_size as 50% of the temp split (resulting in fine=10%, test=10% of original data)
+    fine_size = 0.5
         
-    # Step 2: temp → fine_tune(15%) + test(15%) 분할
+    # Step 2: temp → fine_tune(10%) + test(10%) split
     fine_df, test_df = train_test_split(
         temp_df,
-        fine_size=fine_size,  # 50% of 20% = 10% of original
+        test_size=fine_size,  # 50% of 20% = 10% of original
         random_state=42,
         stratify=temp_df["DLNQ_1M_FLG"]
     )
                    
-    X_train_str = train_df[str_col_list_less_target].values  # (행, 50)
-    X_train_num = train_df[num_col_list].values  # (행, 45)
+    X_train_str = train_df[str_col_list_less_target].values  # (rows, 50)
+    X_train_num = train_df[num_col_list].values  # (rows, 45)
     y_train = train_df["DLNQ_1M_FLG"].values
     
     X_fine_str = fine_df[str_col_list_less_target].values
@@ -243,15 +257,12 @@ def load_data_for_training(
     
     print("Train size:", len(train_df), "Fine size:", len(fine_df),"Test size:", len(test_df))
             
-    # Get metadata
-    cat_cols, num_cols = loader.get_column_lists()
-    cat_max_dict = loader.get_categorical_max_dict()
-    
+    # Build metadata dictionary
     metadata = {
-        'categorical_columns': cat_cols,
-        'numerical_columns': num_cols,
+        'categorical_columns': str_col_list_less_target,
+        'numerical_columns': num_col_list,
         'cat_max_dict': cat_max_dict,
-        'num_categorical_features': len(cat_cols),
-        'num_numerical_features': len(num_cols),
+        'num_categorical_features': len(str_col_list_less_target),
+        'num_numerical_features': len(num_col_list),
     }
     return X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, metadata
