@@ -58,10 +58,24 @@ MLOps-Default-prediction/
 ├── requirements.txt
 └── README.md
 ```
+
+### model training results
+'''
+--- Starting V2: Contrastive Learning Pre-training ---
+[Pretrain V2] Epoch 1, Loss: 2.0119
+
+--- Starting Fine-tuning ---
+[Finetune] Epoch  1 | Loss: 97.8080 | Acc: 0.9795 | AUC: 0.9634 | F1: 0.8461
+[Finetune] Epoch  2 | Loss: 26.8114 | Acc: 0.9884 | AUC: 0.9751 | F1: 0.9079
+[Finetune] Epoch  3 | Loss: 2.0275 | Acc: 0.9924 | AUC: 0.9777 | F1: 0.9375
+   -> Test Accuracy: 0.9952, Test ROC-AUC: 0.9771, Test F1-score: 0.9596
+---pretrained_model_f.pth 저장 완료---
+---finetuned_model_f.pth 저장 완료---
+'''
 ### project Flow
 ```
                                          
-model_loading -> data_generation -> data_preprocessing -> load_latest_model → evaluate_model → check_model_performance 
+model_saving_to_MongoDB → data_generation → saving to MongoDB → data_preprocessing →  saving to MongoDB → load_latest_model → evaluate_model → check_model_performance 
 
 ```
 ### DAG Flow
