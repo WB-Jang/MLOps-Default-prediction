@@ -40,12 +40,7 @@ MLOps-Default-prediction/
 │   │   ├── network.py    # Neural network definitions
 │   │   └── training.py   # Training utilities
 │   ├── data/             # Data processing
-│   │   ├── preprocessing.py          # Data preprocessing utilities
-│   │   ├── data_loader.py            # Data loading utilities
-│   │   └── data_augmentation_generator.py  # SDV-based augmentation
-│   ├── kafka/            # Kafka integration
-│   │   ├── producer.py
-│   │   └── consumer.py
+│   │   └── data_gen_loader_processor.py  # SDV-based augmentation
 │   ├── database/         # MongoDB integration
 │   │   └── mongodb.py
 │   └── airflow/
@@ -56,17 +51,37 @@ MLOps-Default-prediction/
 ├── config/               # Configuration
 │   └── settings.py
 ├── logs/                # Application logs
-├── tests/               # Unit tests
 ├── docker/              # Docker configurations
 │   ├── Dockerfile.airflow
 │   └── Dockerfile.app
 ├── docker-compose.yml   # Full stack deployment
 ├── requirements.txt
-├── generate_raw_data.py # Script to generate synthetic data
-├── train.py            # Standalone training script
 └── README.md
 ```
+### project Flow
+```
+                                         
+model_loading -> data_generation -> data_preprocessing -> load_latest_model → evaluate_model → check_model_performance 
 
+```
+### DAG Flow
+```
+                                           ┌─ (F1 >= 0.75) ─┐
+                                           │                 │
+load_latest_model → evaluate_model → check_model_performance │
+                                           │                 │
+                                           │ (F1 < 0.75)     │
+                                           ▼                 │
+                                    prepare_retraining_data  │
+                                           ▼                 │
+                                     finetune_model          │
+                                           ▼                 │
+                                  evaluate_finetuned_model   │
+                                           │                 │
+                                           └────────┬────────┘
+                                                    ▼
+                                          send_evaluation_results
+```
 ## Setup Instructions
 
 ### Prerequisites
