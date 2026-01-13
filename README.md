@@ -60,7 +60,7 @@ MLOps-Default-prediction/
 ```
 
 ### model training results
-'''
+```
 --- Starting V2: Contrastive Learning Pre-training ---
 [Pretrain V2] Epoch 1, Loss: 2.0119
 
@@ -71,7 +71,7 @@ MLOps-Default-prediction/
    -> Test Accuracy: 0.9952, Test ROC-AUC: 0.9771, Test F1-score: 0.9596
 ---pretrained_model_f.pth 저장 완료---
 ---finetuned_model_f.pth 저장 완료---
-'''
+```
 ### project Flow
 ```
                                          
