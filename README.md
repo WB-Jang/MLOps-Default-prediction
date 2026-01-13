@@ -1,6 +1,6 @@
 # MLOps Default Prediction Pipeline
 
-A comprehensive MLOps pipeline for loan default prediction using PyTorch, Kafka, Airflow, and MongoDB.
+A comprehensive MLOps pipeline for loan default prediction using PyTorch, Airflow, and MongoDB.
 
 ## Architecture Overview
 
