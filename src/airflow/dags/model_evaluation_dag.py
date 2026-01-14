@@ -1,4 +1,4 @@
-"""Airflow DAG for model evaluation pipeline."""
+"""Airflow DAG for model evaluation pipeline with retry mechanism."""
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
@@ -6,8 +6,10 @@ from airflow.utils.dates import days_ago
 import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
 
 import sys
 import os
@@ -15,9 +17,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from src.database.mongodb import mongodb_client
 from src.models import Encoder, TabTransformerClassifier
+from src.models.evaluation import evaluate_model as eval_model_func, finetune_model as finetune_func
 from src.data.data_gen_loader_processor import load_data_for_training
 from config.settings import settings
 from loguru import logger
+
+
+# F1 score threshold for retraining
+F1_THRESHOLD = 0.75
+MAX_RETRAIN_ATTEMPTS = 3
 
 
 default_args = {
@@ -59,43 +67,95 @@ def load_latest_model(**context):
 
 
 def evaluate_model(**context):
-    """Evaluate the model on test data."""
-    logger.info("Evaluating model")
+    """Evaluate the model on test data using evaluation functions from corp_default_modeling_f.py."""
+    logger.info("Evaluating model using standardized evaluation function")
     
     # Get model info from previous task
     ti = context['ti']
     model_info = ti.xcom_pull(task_ids='load_latest_model')
     
-    # In production, this would load actual test data and evaluate
-    # For demonstration, creating sample metrics
-    metrics = {
-        "accuracy": 0.85,
-        "precision": 0.82,
-        "recall": 0.88,
-        "f1_score": 0.85,
-        "roc_auc": 0.90
-    }
-    
-    logger.info(f"Model evaluation metrics: {metrics}")
-    
-    # Store metrics in MongoDB
-    mongodb_client.connect()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     try:
-        metrics_id = mongodb_client.store_performance_metrics(
-            model_id=model_info['model_id'],
-            metrics=metrics,
-            dataset_name="test"
+        # Load data for evaluation
+        data_path = "./data/raw/synthetic_data.csv"
+        X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, metadata = load_data_for_training(
+            data_path=data_path,
+            test_size=0.3,
+            random_state=42
         )
-        logger.info(f"Metrics stored with ID: {metrics_id}")
         
-        return {
-            "model_id": model_info['model_id'],
-            "metrics": metrics
-        }
+        # Create DataLoader for test data
+        class DataLoading(Dataset):
+            def __init__(self, X_str, X_num, y):
+                self.X_str = X_str
+                self.X_num = X_num
+                self.y = y
+            
+            def __len__(self):
+                return len(self.y)
+            
+            def __getitem__(self, idx):
+                return {
+                    "str": torch.tensor(self.X_str[idx], dtype=torch.long),
+                    "num": torch.tensor(self.X_num[idx], dtype=torch.float),
+                    "label": torch.tensor(self.y[idx], dtype=torch.long)
+                }
         
-    finally:
-        mongodb_client.disconnect()
+        test_dataset = DataLoading(X_test_str, X_test_num, y_test)
+        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+        
+        # Load model
+        encoder = Encoder(
+            cnt_cat_features=metadata['num_categorical_features'],
+            cnt_num_features=metadata['num_numerical_features'],
+            cat_max_dict=metadata['cat_max_dict'],
+            d_model=settings.d_model,
+            nhead=settings.nhead,
+            num_layers=settings.num_layers,
+            dim_feedforward=settings.dim_feedforward,
+            dropout_rate=settings.dropout_rate
+        )
+        
+        classifier = TabTransformerClassifier(
+            encoder=encoder,
+            d_model=settings.d_model,
+            final_hidden=128,
+            dropout_rate=settings.dropout_rate
+        )
+        
+        checkpoint = torch.load(model_info['model_path'], map_location=device)
+        classifier.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Use evaluation function from corp_default_modeling_f.py
+        metrics = eval_model_func(classifier, test_loader, device=device)
+        
+        logger.info(f"Model evaluation metrics: {metrics}")
+        
+        # Store metrics in MongoDB
+        mongodb_client.connect()
+        
+        try:
+            metrics_id = mongodb_client.store_performance_metrics(
+                model_id=model_info['model_id'],
+                metrics=metrics,
+                dataset_name="test"
+            )
+            logger.info(f"Metrics stored with ID: {metrics_id}")
+            
+            return {
+                "model_id": model_info['model_id'],
+                "metrics": metrics,
+                "metadata": metadata,
+                "data_path": data_path
+            }
+            
+        finally:
+            mongodb_client.disconnect()
+            
+    except Exception as e:
+        logger.error(f"Error during evaluation: {e}")
+        raise
 
 
 def check_model_performance(**context):
@@ -108,21 +168,31 @@ def check_model_performance(**context):
     
     metrics = eval_result['metrics']
     
-    # Define performance thresholds
-    f1_threshold = 0.75
+    # Get retry attempt count from XCom (default to 0)
+    retry_count = ti.xcom_pull(key='retry_count', default=0)
     
     # Check F1 score against threshold
-    needs_retraining = metrics['f1_score'] < f1_threshold
+    needs_retraining = metrics['f1_score'] < F1_THRESHOLD
     
     if needs_retraining:
-        logger.warning(f"Model F1 score {metrics['f1_score']:.4f} below threshold {f1_threshold}")
-        logger.info("Model will be fine-tuned")
-        status = "needs_retraining"
-        next_task = 'prepare_retraining_data'
+        logger.warning(f"Model F1 score {metrics['f1_score']:.4f} below threshold {F1_THRESHOLD}")
+        logger.info(f"Retraining attempt {retry_count + 1}/{MAX_RETRAIN_ATTEMPTS}")
+        
+        if retry_count < MAX_RETRAIN_ATTEMPTS:
+            status = "needs_retraining"
+            next_task = 'prepare_retraining_data'
+            # Increment retry count
+            ti.xcom_push(key='retry_count', value=retry_count + 1)
+        else:
+            logger.error(f"Maximum retraining attempts ({MAX_RETRAIN_ATTEMPTS}) reached. Sending alert.")
+            status = "failed_max_retries"
+            next_task = 'send_alert'
     else:
         logger.info(f"Model performance meets requirements (F1: {metrics['f1_score']:.4f})")
         status = "approved"
         next_task = 'send_evaluation_results'
+        # Reset retry count on success
+        ti.xcom_push(key='retry_count', value=0)
     
     # Update model status in MongoDB
     mongodb_client.connect()
@@ -131,7 +201,7 @@ def check_model_performance(**context):
         mongodb_client.update_model_status(
             model_id=eval_result['model_id'],
             status=status,
-            notes=f"F1 Score: {metrics['f1_score']:.4f}, Threshold: {f1_threshold}"
+            notes=f"F1 Score: {metrics['f1_score']:.4f}, Threshold: {F1_THRESHOLD}, Retry: {retry_count}"
         )
     finally:
         mongodb_client.disconnect()
@@ -141,7 +211,8 @@ def check_model_performance(**context):
         "status": status,
         "metrics": metrics,
         "needs_retraining": needs_retraining,
-        "f1_threshold": f1_threshold
+        "f1_threshold": F1_THRESHOLD,
+        "retry_count": retry_count
     })
     
     return next_task
@@ -186,11 +257,12 @@ def prepare_retraining_data(**context):
 
 
 def finetune_model(**context):
-    """Fine-tune the classifier (freeze encoder, train classifier only)."""
-    logger.info("Starting model fine-tuning")
+    """Fine-tune the classifier using code from corp_default_modeling_f.py."""
+    logger.info("Starting model fine-tuning using standardized fine-tuning function")
     
     ti = context['ti']
     model_info = ti.xcom_pull(task_ids='load_latest_model')
+    eval_result = ti.xcom_pull(task_ids='evaluate_model')
     retrain_info = ti.xcom_pull(task_ids='prepare_retraining_data')
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -198,17 +270,37 @@ def finetune_model(**context):
     
     try:
         # Load the data for fine-tuning
-        data_path = retrain_info['data_path']
-        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
+        data_path = eval_result['data_path']
+        metadata = eval_result['metadata']
+        X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, _ = load_data_for_training(
             data_path=data_path,
-            test_size=0.2,
+            test_size=0.3,
             random_state=42
         )
         
-        # Use test data for fine-tuning
-        X_finetune_str = X_test["str"][:int(len(X_test["str"]) * 0.7)]
-        X_finetune_num = X_test["num"][:int(len(X_test["num"]) * 0.7)]
-        y_finetune = y_test[:int(len(y_test) * 0.7)]
+        # Create Dataset class
+        class DataLoading(Dataset):
+            def __init__(self, X_str, X_num, y):
+                self.X_str = X_str
+                self.X_num = X_num
+                self.y = y
+            
+            def __len__(self):
+                return len(self.y)
+            
+            def __getitem__(self, idx):
+                return {
+                    "str": torch.tensor(self.X_str[idx], dtype=torch.long),
+                    "num": torch.tensor(self.X_num[idx], dtype=torch.float),
+                    "label": torch.tensor(self.y[idx], dtype=torch.long)
+                }
+        
+        # Use fine-tuning data (evaluation data)
+        fine_dataset = DataLoading(X_fine_str, X_fine_num, y_fine)
+        test_dataset = DataLoading(X_test_str, X_test_num, y_test)
+        
+        fine_loader = DataLoader(fine_dataset, batch_size=16, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
         
         # Load the existing model
         model_path = model_info['model_path']
@@ -238,49 +330,25 @@ def finetune_model(**context):
         classifier.load_state_dict(checkpoint['model_state_dict'])
         classifier.to(device)
         
-        # Freeze encoder parameters (only fine-tune classifier)
-        for param in classifier.encoder.parameters():
-            param.requires_grad = False
+        # Compute class weights for balanced training
+        classes = np.unique(y_fine)
+        class_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_fine)
+        class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
         
-        # Only classifier parameters will be trained
-        trainable_params = sum(p.numel() for p in classifier.fc.parameters())
-        total_params = sum(p.numel() for p in classifier.parameters())
-        logger.info(f"Trainable parameters: {trainable_params}/{total_params} (classifier only)")
+        # Fine-tuning with class weights (as in corp_default_modeling_f.py)
+        optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-4)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         
-        # Fine-tuning with smaller learning rate
-        optimizer = torch.optim.Adam(classifier.fc.parameters(), lr=1e-4)
-        criterion = nn.CrossEntropyLoss()
-        
-        classifier.train()
-        num_epochs = 5  # Fewer epochs for fine-tuning
-        batch_size = 32
-        
-        # Convert to tensors
-        X_str_tensor = torch.from_numpy(X_finetune_str).long()
-        X_num_tensor = torch.from_numpy(X_finetune_num).float()
-        y_tensor = torch.from_numpy(y_finetune).long()
-        
-        # Simple training loop
-        for epoch in range(num_epochs):
-            total_loss = 0.0
-            num_batches = 0
-            
-            for i in range(0, len(y_tensor), batch_size):
-                batch_str = X_str_tensor[i:i+batch_size].to(device)
-                batch_num = X_num_tensor[i:i+batch_size].to(device)
-                batch_labels = y_tensor[i:i+batch_size].to(device)
-                
-                optimizer.zero_grad()
-                logits = classifier(batch_str, batch_num)
-                loss = criterion(logits, batch_labels)
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                num_batches += 1
-            
-            avg_loss = total_loss / num_batches
-            logger.info(f"Fine-tuning Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        # Use finetune function from corp_default_modeling_f.py
+        training_metrics, test_metrics = finetune_func(
+            model=classifier,
+            train_loader=fine_loader,
+            test_loader=test_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            device=device,
+            epochs=3
+        )
         
         # Save fine-tuned model
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -313,9 +381,10 @@ def finetune_model(**context):
                     "num_categorical_features": metadata['num_categorical_features'],
                     "num_numerical_features": metadata['num_numerical_features'],
                     "finetuned_from": model_info['model_id'],
-                    "finetune_epochs": num_epochs,
+                    "finetune_epochs": 3,
                     "finetune_lr": 1e-4
-                }
+                },
+                metrics=test_metrics
             )
             logger.info(f"Fine-tuned model metadata stored with ID: {finetuned_model_id}")
             
@@ -324,7 +393,8 @@ def finetune_model(**context):
                 "model_path": finetuned_path,
                 "finetuned_from": model_info['model_id'],
                 "metadata": metadata,
-                "data_path": data_path
+                "data_path": data_path,
+                "test_metrics": test_metrics
             }
         finally:
             mongodb_client.disconnect()
@@ -335,107 +405,124 @@ def finetune_model(**context):
 
 
 def evaluate_finetuned_model(**context):
-    """Evaluate the fine-tuned model on re-evaluation data."""
+    """Evaluate the fine-tuned model and check if it needs another retry."""
     logger.info("Evaluating fine-tuned model")
     
     ti = context['ti']
     finetuned_info = ti.xcom_pull(task_ids='finetune_model')
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Get test metrics from fine-tuning
+    test_metrics = finetuned_info['test_metrics']
     
+    logger.info(f"Fine-tuned model metrics: {test_metrics}")
+    
+    # Get retry count
+    retry_count = ti.xcom_pull(key='retry_count', default=1)
+    
+    # Check if performance is still below threshold
+    if test_metrics['f1_score'] < F1_THRESHOLD:
+        logger.warning(
+            f"Fine-tuned model F1 score {test_metrics['f1_score']:.4f} "
+            f"still below threshold {F1_THRESHOLD}. Retry {retry_count}/{MAX_RETRAIN_ATTEMPTS}"
+        )
+        
+        if retry_count < MAX_RETRAIN_ATTEMPTS:
+            # Need to retry - loop back to evaluation
+            next_task = 'check_model_performance'
+            logger.info(f"Will retry retraining (attempt {retry_count + 1}/{MAX_RETRAIN_ATTEMPTS})")
+        else:
+            # Max retries reached - send alert
+            next_task = 'send_alert'
+            logger.error(f"Maximum retraining attempts reached. F1 score still {test_metrics['f1_score']:.4f}")
+    else:
+        # Performance is good - continue to results
+        next_task = 'send_evaluation_results'
+        logger.info(f"Fine-tuned model meets threshold. F1 score: {test_metrics['f1_score']:.4f}")
+    
+    # Store evaluation in MongoDB
+    mongodb_client.connect()
     try:
-        # Load re-evaluation data
-        data_path = finetuned_info['data_path']
-        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
-            data_path=data_path,
-            test_size=0.2,
-            random_state=42
+        metrics_id = mongodb_client.store_performance_metrics(
+            model_id=finetuned_info['model_id'],
+            metrics=test_metrics,
+            dataset_name="post_finetune_test"
         )
+        logger.info(f"Fine-tuned model metrics stored with ID: {metrics_id}")
         
-        # Use remaining test data for re-evaluation
-        X_reval_str = X_test["str"][int(len(X_test["str"]) * 0.7):]
-        X_reval_num = X_test["num"][int(len(X_test["num"]) * 0.7):]
-        y_reval = y_test[int(len(y_test) * 0.7):]
-        
-        # Load fine-tuned model
-        encoder = Encoder(
-            cnt_cat_features=metadata['num_categorical_features'],
-            cnt_num_features=metadata['num_numerical_features'],
-            cat_max_dict=metadata['cat_max_dict'],
-            d_model=settings.d_model,
-            nhead=settings.nhead,
-            num_layers=settings.num_layers,
-            dim_feedforward=settings.dim_feedforward,
-            dropout_rate=settings.dropout_rate
-        )
-        
-        classifier = TabTransformerClassifier(
-            encoder=encoder,
-            d_model=settings.d_model,
-            final_hidden=128,
-            dropout_rate=settings.dropout_rate
-        )
-        
-        checkpoint = torch.load(finetuned_info['model_path'], map_location=device)
-        classifier.load_state_dict(checkpoint['model_state_dict'])
-        classifier.to(device)
-        classifier.eval()
-        
-        # Evaluate on re-evaluation set
-        X_str_tensor = torch.from_numpy(X_reval_str).long()
-        X_num_tensor = torch.from_numpy(X_reval_num).float()
-        y_tensor = torch.from_numpy(y_reval).long()
-        
-        with torch.no_grad():
-            logits = classifier(X_str_tensor.to(device), X_num_tensor.to(device))
-            predictions = torch.argmax(logits, dim=1).cpu().numpy()
-        
-        # Calculate metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-        
-        accuracy = accuracy_score(y_reval, predictions)
-        precision = precision_score(y_reval, predictions, zero_division=0)
-        recall = recall_score(y_reval, predictions, zero_division=0)
-        f1 = f1_score(y_reval, predictions, zero_division=0)
-        
-        # For ROC AUC, use probabilities
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[:, 1]
-        try:
-            roc_auc = roc_auc_score(y_reval, probs)
-        except:
-            roc_auc = 0.0
-        
-        metrics = {
-            "accuracy": float(accuracy),
-            "precision": float(precision),
-            "recall": float(recall),
-            "f1_score": float(f1),
-            "roc_auc": float(roc_auc)
+        return {
+            "model_id": finetuned_info['model_id'],
+            "metrics": test_metrics,
+            "finetuned_from": finetuned_info['finetuned_from'],
+            "next_task": next_task
         }
+    finally:
+        mongodb_client.disconnect()
+
+
+def send_alert(**context):
+    """Send alert when model fails to meet threshold after maximum retries."""
+    logger.error("ALERT: Model failed to meet performance threshold after maximum retries")
+    
+    ti = context['ti']
+    model_info = ti.xcom_pull(task_ids='load_latest_model')
+    performance_check = ti.xcom_pull(key='performance_check', task_ids='check_model_performance')
+    retry_count = ti.xcom_pull(key='retry_count', default=MAX_RETRAIN_ATTEMPTS)
+    
+    # Get latest finetuned metrics if available
+    finetuned_result = ti.xcom_pull(task_ids='evaluate_finetuned_model')
+    
+    if finetuned_result:
+        final_f1 = finetuned_result['metrics']['f1_score']
+        final_model_id = finetuned_result['model_id']
+    else:
+        final_f1 = performance_check['metrics']['f1_score']
+        final_model_id = model_info['model_id']
+    
+    alert_message = {
+        "alert_type": "MODEL_PERFORMANCE_FAILURE",
+        "severity": "CRITICAL",
+        "timestamp": datetime.utcnow(),
+        "model_id": final_model_id,
+        "original_model_id": model_info['model_id'],
+        "f1_score": final_f1,
+        "f1_threshold": F1_THRESHOLD,
+        "retry_attempts": retry_count,
+        "max_retries": MAX_RETRAIN_ATTEMPTS,
+        "message": (
+            f"Model failed to meet F1 threshold of {F1_THRESHOLD} after {retry_count} retraining attempts. "
+            f"Final F1 score: {final_f1:.4f}. Manual intervention required."
+        )
+    }
+    
+    logger.error(f"Alert details: {alert_message}")
+    
+    # Store alert in MongoDB
+    mongodb_client.connect()
+    try:
+        alert_collection = mongodb_client.get_collection("alerts")
+        alert_id = alert_collection.insert_one(alert_message).inserted_id
+        logger.error(f"Alert stored in MongoDB with ID: {alert_id}")
         
-        logger.info(f"Fine-tuned model evaluation metrics: {metrics}")
+        # Also store in evaluation events for tracking
+        event_document = {
+            "event_type": "evaluation_failed",
+            "timestamp": datetime.utcnow(),
+            "model_id": final_model_id,
+            "status": "failed_max_retries",
+            "metrics": {"f1_score": final_f1},
+            "retry_attempts": retry_count,
+            "alert_id": str(alert_id)
+        }
+        mongodb_client.get_collection("evaluation_events").insert_one(event_document)
         
-        # Store metrics in MongoDB
-        mongodb_client.connect()
-        try:
-            metrics_id = mongodb_client.store_performance_metrics(
-                model_id=finetuned_info['model_id'],
-                metrics=metrics,
-                dataset_name="re_evaluation"
-            )
-            logger.info(f"Fine-tuned model metrics stored with ID: {metrics_id}")
-            
-            return {
-                "model_id": finetuned_info['model_id'],
-                "metrics": metrics,
-                "finetuned_from": finetuned_info['finetuned_from']
-            }
-        finally:
-            mongodb_client.disconnect()
-            
-    except Exception as e:
-        logger.error(f"Error evaluating fine-tuned model: {e}")
-        raise
+        # TODO: Integrate with actual alerting system (email, Slack, PagerDuty, etc.)
+        # Example: send_email_alert(alert_message)
+        # Example: send_slack_alert(alert_message)
+        
+    finally:
+        mongodb_client.disconnect()
+    
+    logger.error("Alert sent successfully. Manual intervention required.")
 
 
 def send_evaluation_results(**context):
@@ -547,14 +634,21 @@ with DAG(
         provide_context=True,
     )
     
-    # Task 4c: Evaluate fine-tuned model
-    evaluate_finetuned_task = PythonOperator(
+    # Task 4c: Evaluate fine-tuned model (returns branch decision)
+    evaluate_finetuned_task = BranchPythonOperator(
         task_id='evaluate_finetuned_model',
         python_callable=evaluate_finetuned_model,
         provide_context=True,
     )
     
-    # Task 5: Send results (both branches converge here)
+    # Task 5a: Send alert (if max retries exceeded)
+    send_alert_task = PythonOperator(
+        task_id='send_alert',
+        python_callable=send_alert,
+        provide_context=True,
+    )
+    
+    # Task 5b: Send results (both branches converge here)
     send_results_task = PythonOperator(
         task_id='send_evaluation_results',
         python_callable=send_evaluation_results,
@@ -567,7 +661,18 @@ with DAG(
     load_model_task >> evaluate_task >> check_task
     
     # Branch 1: Retraining path (if F1 < threshold)
-    check_task >> prepare_retrain_task >> finetune_task >> evaluate_finetuned_task >> send_results_task
+    check_task >> prepare_retrain_task >> finetune_task >> evaluate_finetuned_task
+    
+    # Branch 1a: Retry loop (if still below threshold and retries remain)
+    # Note: evaluate_finetuned_task returns 'check_model_performance' to loop back
+    evaluate_finetuned_task >> check_task  # Loop back for retry
+    
+    # Branch 1b: Success after retraining
+    evaluate_finetuned_task >> send_results_task
     
     # Branch 2: Direct to results (if F1 >= threshold)
     check_task >> send_results_task
+    
+    # Branch 3: Alert path (if max retries exceeded)
+    check_task >> send_alert_task
+    evaluate_finetuned_task >> send_alert_task
