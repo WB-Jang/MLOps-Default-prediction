@@ -27,9 +27,17 @@ This project implements a complete MLOps pipeline with the following components:
    - **Training Logs**: Records training pipeline execution data
 
 4. **Airflow Orchestration**
-   - **Data Ingestion DAG**: Automated data collection and distribution
+   - **Data Ingestion DAG**: Automated data generation using distribution model and processing
    - **Model Training DAG**: End-to-end training pipeline
-   - **Model Evaluation DAG**: Automated model evaluation and validation
+   - **Model Evaluation DAG**: Automated evaluation with **3-retry retraining** and alert mechanism
+   - **Model Deployment DAG**: Automated deployment of approved models
+
+5. **Advanced Features**
+   - **Automatic Retraining**: Up to 3 retries if model F1 score < threshold
+   - **Alert System**: Automatic alerts stored in MongoDB when max retries exceeded
+   - **Code Reuse**: Evaluation and fine-tuning use code from `corp_default_modeling_f.py`
+   - **Version Control**: All models tracked with versions in MongoDB
+   - **Daily Automation**: Complete pipeline runs daily
 
 ## Project Structure
 
@@ -38,16 +46,19 @@ MLOps-Default-prediction/
 ├── src/
 │   ├── models/           # Model architecture and training
 │   │   ├── network.py    # Neural network definitions
-│   │   └── training.py   # Training utilities
+│   │   ├── training.py   # Training utilities
+│   │   └── evaluation.py # Evaluation & fine-tuning (from corp_default_modeling_f.py)
 │   ├── data/             # Data processing
-│   │   └── data_gen_loader_processor.py  # SDV-based augmentation
+│   │   ├── data_gen_loader_processor.py  # SDV-based data generation
+│   │   └── distribution_model.pkl         # Distribution model for synthetic data
 │   ├── database/         # MongoDB integration
 │   │   └── mongodb.py
 │   └── airflow/
 │       └── dags/         # Airflow DAGs
-│           ├── data_ingestion_dag.py
-│           ├── model_training_dag.py
-│           └── model_evaluation_dag.py
+│           ├── data_ingestion_dag.py      # Data generation & processing
+│           ├── model_training_dag.py       # Model training
+│           ├── model_evaluation_dag.py     # Evaluation with retry
+│           └── model_deployment_dag.py     # Model deployment
 ├── config/               # Configuration
 │   └── settings.py
 ├── logs/                # Application logs
@@ -56,7 +67,8 @@ MLOps-Default-prediction/
 │   └── Dockerfile.app
 ├── docker-compose.yml   # Full stack deployment
 ├── requirements.txt
-└── README.md
+├── README.md
+└── WORKFLOW.md         # Complete workflow documentation (Korean)
 ```
 
 ### model training results
@@ -72,30 +84,71 @@ MLOps-Default-prediction/
 ---pretrained_model_f.pth 저장 완료---
 ---finetuned_model_f.pth 저장 완료---
 ```
-### project Flow
-```
-                                         
-model_saving_to_MongoDB → data_generation → saving to MongoDB → data_preprocessing →  saving to MongoDB → load_latest_model → evaluate_model → check_model_performance 
+### Project Flow
+
+본 프로젝트는 일별로 반복되는 완전한 MLOps 파이프라인을 구현합니다:
 
 ```
-### DAG Flow
+1. 초기 모델 저장 (MongoDB)
+   ↓
+2. 일별 데이터 생성 (Distribution model 활용)
+   → MongoDB 저장
+   ↓
+3. 데이터 전처리
+   → MongoDB processed_data 저장
+   ↓
+4. 최신 모델 평가 (corp_default_modeling_f.py 코드 사용)
+   ↓
+5. F1 Score 체크
+   ├─ F1 >= 0.75 → 배포
+   └─ F1 < 0.75 → 재학습 시작 (최대 3회)
+       ├─ 1차 재학습 → 평가
+       ├─ 2차 재학습 → 평가 (필요시)
+       ├─ 3차 재학습 → 평가 (필요시)
+       └─ 3회 후에도 실패 → Alert 발송
+   ↓
+6. 승인된 모델 MongoDB에 새 버전으로 저장
+   ↓
+7. 모델 배포 (프로덕션)
+   ↓
+8. 다음 날 2번부터 반복
 ```
-                                           ┌─ (F1 >= 0.75) ─┐
-                                           │                 │
+
+### Enhanced DAG Flow (With Retry Mechanism)
+
+```
+                                            ┌─ (F1 >= 0.75) ─┐
+                                            │                 │
 load_latest_model → evaluate_model → check_model_performance │
-                                           │                 │
-                                           │ (F1 < 0.75)     │
-                                           ▼                 │
-                                    prepare_retraining_data  │
-                                           ▼                 │
-                                     finetune_model          │
-                                           ▼                 │
-                                  evaluate_finetuned_model   │
-                                           │                 │
-                                           └────────┬────────┘
-                                                    ▼
-                                          send_evaluation_results
+                                            │                 │
+                                            │ (F1 < 0.75)     │
+                                            ▼                 │
+                                     prepare_retraining_data  │
+                                            ▼                 │
+                                      finetune_model          │
+                                            ▼                 │
+                                   evaluate_finetuned_model   │
+                                            │                 │
+                    ┌─── (retry<3) ────────┤                 │
+                    │                       │                 │
+                    │              (retry>=3 & F1<0.75)       │
+                    │                       │                 │
+                    ↓                       ↓                 │
+          check_model_performance      send_alert            │
+               (Loop back)                  │                 │
+                                            └────────┬────────┘
+                                                     ▼
+                                           send_evaluation_results
+                                                     ↓
+                                           deploy_model
 ```
+
+**주요 특징**:
+- **최대 3회 재학습**: F1 score가 threshold 미만이면 최대 3회까지 자동 재학습
+- **자동 Alert**: 3회 재학습 후에도 실패하면 MongoDB에 alert 저장
+- **코드 재사용**: `corp_default_modeling_f.py`의 평가/학습 코드 사용
+- **버전 관리**: 모든 재학습 모델은 새 버전으로 MongoDB에 저장
+- **자동 배포**: 승인된 모델은 자동으로 프로덕션에 배포
 ## Setup Instructions
 
 ### Prerequisites
@@ -482,6 +535,18 @@ rm -rf data/raw/*.csv models/*.pth logs/*.log
 
 ## Advanced Usage
 
+### Complete Workflow Documentation
+
+For detailed information about the complete daily pipeline workflow, see **[WORKFLOW.md](WORKFLOW.md)** (Korean).
+
+This document includes:
+- Complete workflow diagram with retry mechanism
+- Detailed implementation of each step
+- How evaluation and fine-tuning code from `corp_default_modeling_f.py` is used
+- MongoDB collection structure
+- Retry and alert mechanism details
+- Troubleshooting guide
+
 ### Accessing MongoDB Data
 
 ```bash
@@ -497,6 +562,47 @@ db.raw_data.find().limit(5)
 db.model_metadata.find().pretty()
 db.training_events.find().sort({timestamp: -1}).limit(10)
 db.evaluation_events.find().sort({timestamp: -1}).limit(10)
+
+# Check alerts (for failed retraining)
+db.alerts.find().sort({timestamp: -1})
+
+# Check processed data
+db.processed_data.find().limit(5)
+
+# Check deployment history
+db.deployment_events.find().sort({timestamp: -1})
+```
+
+### Monitoring Model Performance
+
+```javascript
+// MongoDB shell queries for monitoring
+
+// Get latest model evaluation
+db.evaluation_events.findOne({}, {sort: {timestamp: -1}})
+
+// Get models that needed retraining
+db.model_metadata.find({finetuned_from: {$exists: true}})
+
+// Get all alerts
+db.alerts.find({alert_type: "MODEL_PERFORMANCE_FAILURE"})
+
+// Check retry history
+db.evaluation_events.find({
+  "retraining_info.was_retrained": true
+}).sort({timestamp: -1})
+```
+
+### Adjusting F1 Threshold and Retry Count
+
+Edit `src/airflow/dags/model_evaluation_dag.py`:
+
+```python
+# Change F1 threshold (default: 0.75)
+F1_THRESHOLD = 0.80  # More strict
+
+# Change max retry attempts (default: 3)
+MAX_RETRAIN_ATTEMPTS = 5  # More retries
 ```
 
 ## Deployment
