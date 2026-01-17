@@ -1,5 +1,6 @@
 """
 Airflow DAG for data generation, storage, and processing using DataGenLoaderProcessor.
+This DAG implements the daily data generation -> storage -> processing workflow.
 """
 from datetime import datetime, timedelta
 from airflow import DAG
@@ -7,6 +8,7 @@ from airflow.operators.python import PythonOperator
 import sys
 import os
 from loguru import logger
+import pandas as pd
 
 # 프로젝트 루트 경로 추가 (모듈 import를 위해)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -15,8 +17,10 @@ from src.database.mongodb import mongodb_client
 from src.data.data_gen_loader_processor import DataGenLoaderProcessor
 
 # 설정
-DATA_PATH = "../data/synthetic_data.csv"
+DATA_PATH = "./data/raw/synthetic_data.csv"
+PROCESSED_DATA_PATH = "./data/processed/processed_data.csv"
 DATASET_NAME = "loan_default_prediction"
+DISTRIBUTION_MODEL_PATH = "./src/data/distribution_model.pkl"
 
 default_args = {
     'owner': 'mlops',
@@ -30,17 +34,29 @@ default_args = {
 
 def generate_data_task(**context):
     """
-    DataGenLoaderProcessor를 사용하여 합성 데이터를 생성합니다.
+    DataGenLoaderProcessor를 사용하여 Distribution model로부터 합성 데이터를 생성합니다.
     """
-    logger.info("Starting data generation...")
+    logger.info("Starting data generation using distribution model...")
     
     # 데이터 디렉토리 생성
     os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
     
-    processor = DataGenLoaderProcessor(data_path=DATA_PATH)
-    processor.data_generation(data_quantity=10000)
-    
-    logger.info(f"Data generated successfully at {DATA_PATH}")
+    try:
+        processor = DataGenLoaderProcessor(data_path=DATA_PATH)
+        # Use distribution model to generate synthetic data
+        processor.data_generation(data_quantity=10000)
+        
+        logger.info(f"Data generated successfully at {DATA_PATH}")
+        
+        # Store generation metadata
+        context['ti'].xcom_push(key='generation_timestamp', value=datetime.utcnow().isoformat())
+        
+    except FileNotFoundError as e:
+        logger.warning(f"Distribution model not found: {e}")
+        logger.info("Fallback: Using alternative data generation method")
+        # Fallback to alternative generation if distribution model is missing
+        import subprocess
+        subprocess.run(["python", "generate_raw_data.py", "--num-rows", "10000"], check=True)
 
 def upload_to_mongodb_task(**context):
     """
@@ -69,8 +85,12 @@ def upload_to_mongodb_task(**context):
 def preprocess_data_task(**context):
     """
     DataGenLoaderProcessor를 사용하여 데이터를 로드하고 전처리를 수행합니다.
+    전처리된 데이터를 MongoDB에 저장합니다.
     """
     logger.info("Starting data preprocessing...")
+    
+    # 처리된 데이터 디렉토리 생성
+    os.makedirs(os.path.dirname(PROCESSED_DATA_PATH), exist_ok=True)
     
     processor = DataGenLoaderProcessor(data_path=DATA_PATH)
     
@@ -85,17 +105,60 @@ def preprocess_data_task(**context):
     df = processor.obj_cols()
     
     # 4. 날짜 데이터 처리 (dt_data_handling)
-    # dt_data_handling은 내부적으로 self.df를 수정하므로 반환값을 받지 않아도 반영될 수 있으나,
-    # 코드 확인 결과 반환값이 없거나 self.df를 수정하는 구조라면 아래와 같이 호출합니다.
     processor.dt_data_handling()
+    
+    # 5. 데이터 축소 (data_shrinkage)
+    processor.data_shrinkage()
+    
+    # 6. 인코딩 및 스케일링 (detecting_type_encoding)
+    scaled_df, str_col_list, num_col_list, nunique_str = processor.detecting_type_encoding()
     
     # 전처리된 데이터 확인
     logger.info("Preprocessing completed.")
     logger.info(f"Processed columns: {processor.df.columns.tolist()}")
-    logger.info(f"Processed data sample:\n{processor.df.head()}")
-
-    # (옵션) 전처리된 데이터를 다시 저장하거나 다음 단계로 넘길 수 있습니다.
-    # processor.df.to_csv("./data/processed/processed_data.csv", index=False)
+    logger.info(f"Processed data shape: {scaled_df.shape}")
+    
+    # 7. 전처리된 데이터를 CSV로 저장
+    processor.save_processed_data(PROCESSED_DATA_PATH)
+    logger.info(f"Processed data saved to {PROCESSED_DATA_PATH}")
+    
+    # 8. MongoDB에 전처리된 데이터 저장
+    mongodb_client.connect()
+    try:
+        # Convert processed data to dict for MongoDB storage
+        processed_data_records = scaled_df.to_dict('records')
+        
+        # Insert processed data into MongoDB
+        collection = mongodb_client.get_collection("processed_data")
+        result = collection.insert_many([
+            {
+                **record,
+                "processing_timestamp": datetime.utcnow(),
+                "dataset_name": DATASET_NAME
+            }
+            for record in processed_data_records
+        ])
+        
+        logger.info(f"Inserted {len(result.inserted_ids)} processed records into MongoDB")
+        
+        # Store processing metadata
+        metadata_collection = mongodb_client.get_collection("processing_metadata")
+        metadata_collection.insert_one({
+            "timestamp": datetime.utcnow(),
+            "dataset_name": DATASET_NAME,
+            "num_records": len(processed_data_records),
+            "num_categorical_features": len(str_col_list),
+            "num_numerical_features": len(num_col_list),
+            "categorical_features": str_col_list,
+            "numerical_features": num_col_list,
+            "cat_max_dict": nunique_str,
+            "status": "completed"
+        })
+        
+        logger.info("Processing metadata stored in MongoDB")
+        
+    finally:
+        mongodb_client.disconnect()
 
 with DAG(
     'data_pipeline_dag',

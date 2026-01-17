@@ -11,6 +11,10 @@ from .training import (
     train_classifier,
     load_model
 )
+from .evaluation import (
+    evaluate_model,
+    finetune_model
+)
 
 __all__ = [
     "Encoder",
@@ -20,5 +24,7 @@ __all__ = [
     "tabular_augment",
     "pretrain_contrastive",
     "train_classifier",
-    "load_model"
+    "load_model",
+    "evaluate_model",
+    "finetune_model"
 ]
