@@ -28,8 +28,9 @@ default_args = {
     'start_date': datetime(2024, 1, 1),
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retries': 2,
+    'retry_delay': timedelta(minutes=3),
+    'execution_timeout': timedelta(minutes=20),
 }
 
 def generate_data_task(**context):
@@ -123,42 +124,70 @@ def preprocess_data_task(**context):
     logger.info(f"Processed data saved to {PROCESSED_DATA_PATH}")
     
     # 8. MongoDB에 전처리된 데이터 저장
+    # MongoDB에 전처리된 데이터 저장
     mongodb_client.connect()
     try:
-        # Convert processed data to dict for MongoDB storage
-        processed_data_records = scaled_df.to_dict('records')
+        import numpy as np
+        import json
+        
+        # DataFrame을 JSON으로 변환 후 다시 파싱 (완전한 직렬화)
+        json_str = scaled_df. to_json(orient='records', date_format='iso')
+        processed_data_records = json.loads(json_str)
+        
+        logger.info(f"Prepared {len(processed_data_records)} records for MongoDB")
         
         # Insert processed data into MongoDB
         collection = mongodb_client.get_collection("processed_data")
-        result = collection.insert_many([
-            {
-                **record,
-                "processing_timestamp": datetime.utcnow(),
-                "dataset_name": DATASET_NAME
-            }
-            for record in processed_data_records
-        ])
         
-        logger.info(f"Inserted {len(result.inserted_ids)} processed records into MongoDB")
+        # 기존 데이터 삭제
+        collection. delete_many({"dataset_name": DATASET_NAME})
+        logger.info("Cleared existing processed data")
+        
+        # 배치 저장
+        batch_size = 500
+        for i in range(0, len(processed_data_records), batch_size):
+            batch = processed_data_records[i:i+batch_size]
+            batch_with_metadata = [
+                {
+                    **record,
+                    "processing_timestamp": datetime.utcnow().isoformat(),  # ISO 문자열로 변환
+                    "dataset_name": DATASET_NAME
+                }
+                for record in batch
+            ]
+            collection.insert_many(batch_with_metadata)
+            logger.info(f"✅ Inserted batch {i//batch_size + 1}: {len(batch)} records")
+        
+        logger.info(f"✅ Total {len(processed_data_records)} records inserted into MongoDB")
         
         # Store processing metadata
         metadata_collection = mongodb_client.get_collection("processing_metadata")
+        
+        # numpy 타입을 Python 네이티브 타입으로 변환
+        cat_max_dict_clean = {str(k): int(v) for k, v in nunique_str.items()}
+        
         metadata_collection.insert_one({
             "timestamp": datetime.utcnow(),
             "dataset_name": DATASET_NAME,
-            "num_records": len(processed_data_records),
-            "num_categorical_features": len(str_col_list),
-            "num_numerical_features": len(num_col_list),
+            "num_records": int(len(processed_data_records)),
+            "num_categorical_features": int(len(str_col_list)),
+            "num_numerical_features": int(len(num_col_list)),
             "categorical_features": str_col_list,
             "numerical_features": num_col_list,
-            "cat_max_dict": nunique_str,
-            "status": "completed"
+            "cat_max_dict": cat_max_dict_clean,
+            "status":   "completed"
         })
         
-        logger.info("Processing metadata stored in MongoDB")
+        logger.info("✅ Processing metadata stored in MongoDB")
         
     finally:
         mongodb_client.disconnect()
+        logger.info("✅ MongoDB disconnected")
+        
+    logger.info("✅✅✅ Preprocessing completed successfully!")
+    return {"status": "success", "records": len(processed_data_records)}
+        
+    
 
 with DAG(
     'data_pipeline_dag',
@@ -166,7 +195,8 @@ with DAG(
     description='Generate, Upload (GridFS), and Preprocess Data',
     schedule_interval=timedelta(days=1),
     catchup=False,
-) as dag:
+    max_active_runs=1,  # ⭐ 추가:  동시 실행 제한
+) as dag: 
 
     t1_generate = PythonOperator(
         task_id='generate_data',
@@ -181,7 +211,8 @@ with DAG(
     t3_preprocess = PythonOperator(
         task_id='preprocess_data',
         python_callable=preprocess_data_task,
+        execution_timeout=timedelta(minutes=15),  # ⭐ 추가
+        retries=1,  # ⭐ 이 태스크는 1회만 재시도
     )
 
-    # 태스크 순서 정의
     t1_generate >> t2_upload >> t3_preprocess

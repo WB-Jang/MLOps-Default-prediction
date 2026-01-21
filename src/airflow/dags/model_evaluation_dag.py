@@ -67,25 +67,105 @@ def load_latest_model(**context):
 
 
 def evaluate_model(**context):
-    """Evaluate the model on test data using evaluation functions from corp_default_modeling_f.py."""
+    """Evaluate the model on test data using evaluation functions."""
+    import torch
+    import numpy as np
+    from torch.utils.data import DataLoader, Dataset
+    import torch.nn as nn
+
     logger.info("Evaluating model using standardized evaluation function")
     
-    # Get model info from previous task
     ti = context['ti']
     model_info = ti.xcom_pull(task_ids='load_latest_model')
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    if model_info is None: 
+        raise ValueError("No model info from load_latest_model.")
+    
+    # 1. 체크포인트 로드 및 구조 분석
+    logger.info(f"Loading checkpoint from {model_info['model_path']}")
+    checkpoint = torch.load(model_info['model_path'], map_location=device)
+    
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+
+    # [FIX 1] Key 이름 매핑
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("numeric_embeddings", "num_embeddings")
+        new_state_dict[new_key] = v
+    state_dict = new_state_dict
+
+    # [FIX 2] Vocab Size 및 Feature 개수 역추적
+    ckpt_cat_max_dict = {}
+    max_num_idx = -1
+    
+    for k, v in state_dict.items():
+        if "encoder.embeddings." in k and ".weight" in k:
+            try:
+                idx = int(k.split('.')[2])
+                ckpt_cat_max_dict[idx] = v.shape[0]
+            except: pass
+        if "encoder.num_embeddings." in k:
+            try:
+                idx = int(k.split('.')[2])
+                if idx > max_num_idx: max_num_idx = idx
+            except: pass
+
+    # 모델이 기대하는 Feature 개수 계산
+    expected_cat_feats = max(ckpt_cat_max_dict.keys()) + 1 if ckpt_cat_max_dict else 0
+    expected_num_feats = max_num_idx + 1
+    
+    logger.info(f"✅ Model expects: {expected_cat_feats} categorical, {expected_num_feats} numerical features")
+
+    # 2. 데이터 로드
     try:
-        # Load data for evaluation
-        data_path = "/opt/airflow/data/raw/synthetic_data.csv"
+        data_path = "./data/raw/synthetic_data.csv"
         X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, metadata = load_data_for_training(
             data_path=data_path,
             test_size=0.3,
             random_state=42
         )
         
-        # Create DataLoader for test data
+        # ⭐ [FIX 4] Feature Padding (데이터 모양 맞추기)
+        # 범주형 데이터 패딩
+        current_cat_feats = X_test_str.shape[1]
+        if current_cat_feats < expected_cat_feats:
+            diff = expected_cat_feats - current_cat_feats
+            # 부족한 컬럼만큼 0으로 채움
+            padding = np.zeros((X_test_str.shape[0], diff), dtype=X_test_str.dtype)
+            X_test_str = np.hstack([X_test_str, padding])
+            logger.warning(f"⚠️ Padded Categorical Features: {current_cat_feats} -> {expected_cat_feats} (Filled with 0)")
+        elif current_cat_feats > expected_cat_feats:
+            # 넘치는 컬럼은 자름
+            X_test_str = X_test_str[:, :expected_cat_feats]
+            logger.warning(f"✂️ Truncated Categorical Features: {current_cat_feats} -> {expected_cat_feats}")
+
+        # 수치형 데이터 패딩
+        current_num_feats = X_test_num.shape[1]
+        if current_num_feats < expected_num_feats:
+            diff = expected_num_feats - current_num_feats
+            padding = np.zeros((X_test_num.shape[0], diff), dtype=X_test_num.dtype)
+            X_test_num = np.hstack([X_test_num, padding])
+            logger.warning(f"⚠️ Padded Numerical Features: {current_num_feats} -> {expected_num_feats} (Filled with 0)")
+        elif current_num_feats > expected_num_feats:
+            X_test_num = X_test_num[:, :expected_num_feats]
+            logger.warning(f"✂️ Truncated Numerical Features: {current_num_feats} -> {expected_num_feats}")
+
+        # [FIX 3] Data Clamping (Vocab Size 초과 방지)
+        # 패딩 후 수행해야 인덱스 에러가 안 남
+        X_clamped = X_test_str.copy()
+        for col_idx in range(X_clamped.shape[1]):
+            if col_idx in ckpt_cat_max_dict:
+                max_val = ckpt_cat_max_dict[col_idx] - 1
+                mask = X_clamped[:, col_idx] > max_val
+                if np.sum(mask) > 0:
+                    X_clamped[mask, col_idx] = 0 # 0번(보통 Unknown)으로 대체
+        X_test_str = X_clamped
+
+        # Dataset 정의
         class DataLoading(Dataset):
             def __init__(self, X_str, X_num, y):
                 self.X_str = X_str
@@ -105,11 +185,11 @@ def evaluate_model(**context):
         test_dataset = DataLoading(X_test_str, X_test_num, y_test)
         test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
         
-        # Load model
+        # 3. 모델 초기화
         encoder = Encoder(
-            cnt_cat_features=metadata['num_categorical_features'],
-            cnt_num_features=metadata['num_numerical_features'],
-            cat_max_dict=metadata['cat_max_dict'],
+            cnt_cat_features=expected_cat_feats,
+            cnt_num_features=expected_num_feats,
+            cat_max_dict=ckpt_cat_max_dict,
             d_model=settings.d_model,
             nhead=settings.nhead,
             num_layers=settings.num_layers,
@@ -124,17 +204,19 @@ def evaluate_model(**context):
             dropout_rate=settings.dropout_rate
         )
         
-        checkpoint = torch.load(model_info['model_path'], map_location=device)
-        classifier.load_state_dict(checkpoint['model_state_dict'])
+        # 4. 가중치 로드
+        classifier.load_state_dict(state_dict, strict=False)
+        logger.info("✅ Model weights loaded successfully")
         
-        # Use evaluation function from corp_default_modeling_f.py
+        classifier.to(device)
+        classifier.eval()
+        
+        # 5. 평가
         metrics = eval_model_func(classifier, test_loader, device=device)
-        
         logger.info(f"Model evaluation metrics: {metrics}")
         
-        # Store metrics in MongoDB
+        # DB 저장
         mongodb_client.connect()
-        
         try:
             metrics_id = mongodb_client.store_performance_metrics(
                 model_id=model_info['model_id'],
@@ -143,10 +225,12 @@ def evaluate_model(**context):
             )
             logger.info(f"Metrics stored with ID: {metrics_id}")
             
+            # ⭐ [FIX] Do not return 'metadata' containing LabelEncoders
+            # Only return essential info needed for downstream tasks
             return {
                 "model_id": model_info['model_id'],
                 "metrics": metrics,
-                "metadata": metadata,
+                # "metadata": metadata,  <-- REMOVED: Contains non-serializable objects
                 "data_path": data_path
             }
             
@@ -155,8 +239,9 @@ def evaluate_model(**context):
             
     except Exception as e:
         logger.error(f"Error during evaluation: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
-
 
 def check_model_performance(**context):
     """Check if model performance meets threshold and decide on retraining."""
@@ -223,31 +308,40 @@ def prepare_retraining_data(**context):
     logger.info("Preparing data for retraining")
     
     try:
-        # Load the full dataset
-        data_path = "/opt/airflow/data/raw/synthetic_data.csv"
-        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
+        data_path = "./data/raw/synthetic_data.csv"
+        
+        # ⭐ [FIX 1] 10개의 반환값을 하나의 변수로 받음 (Unpacking Error 해결)
+        # load_data_for_training returns 10 values:
+        # 0:X_train_str, 1:X_train_num, 2:y_train, 3:X_fine_str, 4:X_fine_num, 5:y_fine,
+        # 6:X_test_str, 7:X_test_num, 8:y_test, 9:metadata
+        results = load_data_for_training(
             data_path=data_path,
-            test_size=0.2,
+            test_size=0.3,
             random_state=42
         )
         
-        # Use test data for retraining (split into retrain/revalidation)
-        # This simulates using fresh evaluation data for fine-tuning
-        X_retrain_str = X_test["str"][:int(len(X_test["str"]) * 0.7)]
-        X_retrain_num = X_test["num"][:int(len(X_test["num"]) * 0.7)]
-        y_retrain = y_test[:int(len(y_test) * 0.7)]
+        # 필요한 데이터만 인덱스로 추출
+        y_fine = results[5]  # Fine-tuning용 라벨 (Retraining Data)
+        y_test = results[8]  # Test용 라벨 (Re-evaluation Data)
+        metadata = results[9] # 원본 메타데이터
         
-        X_reval_str = X_test["str"][int(len(X_test["str"]) * 0.7):]
-        X_reval_num = X_test["num"][int(len(X_test["num"]) * 0.7):]
-        y_reval = y_test[int(len(y_test) * 0.7):]
+        logger.info(f"Retraining data: {len(y_fine)} samples, Re-evaluation: {len(y_test)} samples")
         
-        logger.info(f"Retraining data: {len(y_retrain)} samples, Re-evaluation: {len(y_reval)} samples")
+        # ⭐ [FIX 2] JSON 직렬화 가능한 데이터만 골라서 새 딕셔너리 생성
+        # LabelEncoder, Scaler 객체는 XCom에 저장할 수 없으므로 제외합니다.
+        metadata_lite = {
+            'num_categorical_features': metadata['num_categorical_features'],
+            'num_numerical_features': metadata['num_numerical_features'],
+            'cat_max_dict': metadata['cat_max_dict'],
+            'categorical_columns': metadata['categorical_columns'],
+            'numerical_columns': metadata['numerical_columns']
+        }
         
-        # Store data info in XCom (we'll pass metadata and data info)
+        # Store data info in XCom
         return {
-            "retrain_samples": len(y_retrain),
-            "reval_samples": len(y_reval),
-            "metadata": metadata,
+            "retrain_samples": len(y_fine),
+            "reval_samples": len(y_test),
+            "metadata": metadata_lite,  # ⭐ 가벼운 메타데이터 전달
             "data_path": data_path
         }
         
@@ -255,91 +349,153 @@ def prepare_retraining_data(**context):
         logger.error(f"Error preparing retraining data: {e}")
         raise
 
-
 def finetune_model(**context):
     """Fine-tune the classifier using code from corp_default_modeling_f.py."""
+    import torch
+    import numpy as np
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, Dataset
+    from sklearn.utils.class_weight import compute_class_weight
+
     logger.info("Starting model fine-tuning using standardized fine-tuning function")
     
     ti = context['ti']
     model_info = ti.xcom_pull(task_ids='load_latest_model')
-    eval_result = ti.xcom_pull(task_ids='evaluate_model')
     retrain_info = ti.xcom_pull(task_ids='prepare_retraining_data')
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
     try:
-        # Load the data for fine-tuning
-        data_path = eval_result['data_path']
-        metadata = eval_result['metadata']
-        X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, _ = load_data_for_training(
-            data_path=data_path,
-            test_size=0.3,
-            random_state=42
-        )
-        
-        # Create Dataset class
-        class DataLoading(Dataset):
-            def __init__(self, X_str, X_num, y):
-                self.X_str = X_str
-                self.X_num = X_num
-                self.y = y
-            
-            def __len__(self):
-                return len(self.y)
-            
-            def __getitem__(self, idx):
-                return {
-                    "str": torch.tensor(self.X_str[idx], dtype=torch.long),
-                    "num": torch.tensor(self.X_num[idx], dtype=torch.float),
-                    "label": torch.tensor(self.y[idx], dtype=torch.long)
-                }
-        
-        # Use fine-tuning data (evaluation data)
-        fine_dataset = DataLoading(X_fine_str, X_fine_num, y_fine)
-        test_dataset = DataLoading(X_test_str, X_test_num, y_test)
-        
-        fine_loader = DataLoader(fine_dataset, batch_size=16, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
-        
-        # Load the existing model
+        # 1. 체크포인트 로드 (구조 파악용)
         model_path = model_info['model_path']
-        logger.info(f"Loading model from {model_path}")
+        logger.info(f"Loading checkpoint from {model_path}")
+        checkpoint = torch.load(model_path, map_location=device)
         
-        # Create model architecture
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+            
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            new_key = k.replace("numeric_embeddings", "num_embeddings")
+            new_state_dict[new_key] = v
+        state_dict = new_state_dict
+
+        ckpt_cat_max_dict = {}
+        max_num_idx = -1
+        for k, v in state_dict.items():
+            if "encoder.embeddings." in k and ".weight" in k:
+                try: idx = int(k.split('.')[2]); ckpt_cat_max_dict[idx] = v.shape[0]
+                except: pass
+            if "encoder.num_embeddings." in k:
+                try: idx = int(k.split('.')[2]); max_num_idx = max(max_num_idx, idx)
+                except: pass
+        
+        expected_cat_feats = max(ckpt_cat_max_dict.keys()) + 1 if ckpt_cat_max_dict else 0
+        expected_num_feats = max_num_idx + 1
+
+        # 2. 데이터 로드
+        data_path = retrain_info['data_path']
+        metadata = retrain_info['metadata']
+        results = load_data_for_training(data_path=data_path, test_size=0.3, random_state=42)
+        
+        X_fine_str = results[3]
+        X_fine_num = results[4]
+        y_fine = results[5]
+        X_test_str = results[6]
+        X_test_num = results[7]
+        y_test = results[8]
+
+        # Padding
+        if X_fine_str.shape[1] < expected_cat_feats:
+            padding = np.zeros((X_fine_str.shape[0], expected_cat_feats - X_fine_str.shape[1]), dtype=X_fine_str.dtype)
+            X_fine_str = np.hstack([X_fine_str, padding])
+            padding_test = np.zeros((X_test_str.shape[0], expected_cat_feats - X_test_str.shape[1]), dtype=X_test_str.dtype)
+            X_test_str = np.hstack([X_test_str, padding_test])
+        elif X_fine_str.shape[1] > expected_cat_feats:
+            X_fine_str = X_fine_str[:, :expected_cat_feats]
+            X_test_str = X_test_str[:, :expected_cat_feats]
+
+        if X_fine_num.shape[1] < expected_num_feats:
+            padding = np.zeros((X_fine_num.shape[0], expected_num_feats - X_fine_num.shape[1]), dtype=X_fine_num.dtype)
+            X_fine_num = np.hstack([X_fine_num, padding])
+            padding_test = np.zeros((X_test_num.shape[0], expected_num_feats - X_test_num.shape[1]), dtype=X_test_num.dtype)
+            X_test_num = np.hstack([X_test_num, padding_test])
+        elif X_fine_num.shape[1] > expected_num_feats:
+            X_fine_num = X_fine_num[:, :expected_num_feats]
+            X_test_num = X_test_num[:, :expected_num_feats]
+
+        # Clamping
+        def clamp_data(X, max_dict):
+            X_c = X.copy()
+            for col_idx in range(X_c.shape[1]):
+                if col_idx in max_dict:
+                    max_val = max_dict[col_idx] - 1
+                    mask = X_c[:, col_idx] > max_val
+                    if np.sum(mask) > 0: X_c[mask, col_idx] = 0 
+            return X_c
+
+        X_fine_str = clamp_data(X_fine_str, ckpt_cat_max_dict)
+        X_test_str = clamp_data(X_test_str, ckpt_cat_max_dict)
+
+        # 3. 모델 초기화 & 로드
         encoder = Encoder(
-            cnt_cat_features=metadata['num_categorical_features'],
-            cnt_num_features=metadata['num_numerical_features'],
-            cat_max_dict=metadata['cat_max_dict'],
+            cnt_cat_features=expected_cat_feats,
+            cnt_num_features=expected_num_feats,
+            cat_max_dict=ckpt_cat_max_dict,
             d_model=settings.d_model,
             nhead=settings.nhead,
             num_layers=settings.num_layers,
             dim_feedforward=settings.dim_feedforward,
             dropout_rate=settings.dropout_rate
         )
-        
         classifier = TabTransformerClassifier(
             encoder=encoder,
             d_model=settings.d_model,
             final_hidden=128,
             dropout_rate=settings.dropout_rate
         )
-        
-        # Load existing weights
-        checkpoint = torch.load(model_path, map_location=device)
-        classifier.load_state_dict(checkpoint['model_state_dict'])
+        classifier.load_state_dict(state_dict, strict=False)
         classifier.to(device)
         
-        # Compute class weights for balanced training
+        # Loader
+        class DataLoading(Dataset):
+            def __init__(self, X_str, X_num, y):
+                self.X_str = X_str; self.X_num = X_num; self.y = y
+            def __len__(self): return len(self.y)
+            def __getitem__(self, idx):
+                return {"str": torch.tensor(self.X_str[idx], dtype=torch.long), "num": torch.tensor(self.X_num[idx], dtype=torch.float), "label": torch.tensor(self.y[idx], dtype=torch.long)}
+        
+        fine_dataset = DataLoading(X_fine_str, X_fine_num, y_fine)
+        test_dataset = DataLoading(X_test_str, X_test_num, y_test)
+        fine_loader = DataLoader(fine_dataset, batch_size=16, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+        
+        # ⭐ [FIX] Class Weights 계산 로직 수정 (단일 클래스 문제 해결)
         classes = np.unique(y_fine)
-        class_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_fine)
-        class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
+        logger.info(f"Unique classes in fine-tuning data: {classes}")
         
-        # Fine-tuning with class weights (as in corp_default_modeling_f.py)
+        if len(classes) > 0:
+            computed_weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_fine)
+            # Binary Classification을 가정하고 크기 2짜리 텐서 생성 (기본값 1.0)
+            final_class_weights = torch.ones(2, dtype=torch.float).to(device)
+            
+            # 존재하는 클래스 위치에만 계산된 가중치 할당
+            for cls, w in zip(classes, computed_weights):
+                if int(cls) < 2: # 0 또는 1 인덱스만 허용
+                    final_class_weights[int(cls)] = float(w)
+        else:
+            # 데이터가 비어있는 경우 (거의 없겠지만)
+            final_class_weights = torch.ones(2, dtype=torch.float).to(device)
+            
+        logger.info(f"Final Class Weights: {final_class_weights}")
+        
         optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-4)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        criterion = nn.CrossEntropyLoss(weight=final_class_weights)
         
-        # Use finetune function from corp_default_modeling_f.py
+        # 5. Run Fine-tuning
         training_metrics, test_metrics = finetune_func(
             model=classifier,
             train_loader=fine_loader,
@@ -350,49 +506,32 @@ def finetune_model(**context):
             epochs=3
         )
         
-        # Save fine-tuned model
+        # Save
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        finetuned_path = os.path.join(
-            settings.model_save_path,
-            f"classifier_finetuned_{timestamp}.pth"
-        )
-        
+        finetuned_path = os.path.join(settings.model_save_path, f"classifier_finetuned_{timestamp}.pth")
         os.makedirs(settings.model_save_path, exist_ok=True)
         torch.save({
             'model_state_dict': classifier.state_dict(),
-            'metadata': metadata,
             'finetuned_from': model_info['model_id'],
             'finetune_timestamp': timestamp
         }, finetuned_path)
         
         logger.info(f"Fine-tuned model saved to {finetuned_path}")
         
-        # Store metadata in MongoDB
+        # DB Store
         mongodb_client.connect()
         try:
             finetuned_model_id = mongodb_client.store_model_metadata(
                 model_name="default_prediction_classifier",
                 model_path=finetuned_path,
                 model_version=timestamp,
-                hyperparameters={
-                    "d_model": settings.d_model,
-                    "final_hidden": 128,
-                    "dropout_rate": settings.dropout_rate,
-                    "num_categorical_features": metadata['num_categorical_features'],
-                    "num_numerical_features": metadata['num_numerical_features'],
-                    "finetuned_from": model_info['model_id'],
-                    "finetune_epochs": 3,
-                    "finetune_lr": 1e-4
-                },
+                hyperparameters={"finetuned_from": model_info['model_id'], "finetune_epochs": 3},
                 metrics=test_metrics
             )
-            logger.info(f"Fine-tuned model metadata stored with ID: {finetuned_model_id}")
-            
             return {
                 "model_id": finetuned_model_id,
                 "model_path": finetuned_path,
                 "finetuned_from": model_info['model_id'],
-                "metadata": metadata,
                 "data_path": data_path,
                 "test_metrics": test_metrics
             }
@@ -401,8 +540,9 @@ def finetune_model(**context):
             
     except Exception as e:
         logger.error(f"Error during fine-tuning: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
-
 
 def evaluate_finetuned_model(**context):
     """Evaluate the fine-tuned model and check if it needs another retry."""
@@ -602,57 +742,49 @@ with DAG(
     # Task 1: Load latest model
     load_model_task = PythonOperator(
         task_id='load_latest_model',
-        python_callable=load_latest_model,
-        provide_context=True,
+        python_callable=load_latest_model,        
     )
     
     # Task 2: Evaluate model
     evaluate_task = PythonOperator(
         task_id='evaluate_model',
-        python_callable=evaluate_model,
-        provide_context=True,
+        python_callable=evaluate_model,        
     )
     
     # Task 3: Check performance (branching)
     check_task = BranchPythonOperator(
         task_id='check_model_performance',
-        python_callable=check_model_performance,
-        provide_context=True,
+        python_callable=check_model_performance,       
     )
     
     # Task 4a: Prepare retraining data (if performance is low)
     prepare_retrain_task = PythonOperator(
         task_id='prepare_retraining_data',
-        python_callable=prepare_retraining_data,
-        provide_context=True,
+        python_callable=prepare_retraining_data,        
     )
     
     # Task 4b: Fine-tune model
     finetune_task = PythonOperator(
         task_id='finetune_model',
-        python_callable=finetune_model,
-        provide_context=True,
+        python_callable=finetune_model,        
     )
     
     # Task 4c: Evaluate fine-tuned model (returns branch decision)
     evaluate_finetuned_task = BranchPythonOperator(
         task_id='evaluate_finetuned_model',
         python_callable=evaluate_finetuned_model,
-        provide_context=True,
     )
     
     # Task 5a: Send alert (if max retries exceeded)
     send_alert_task = PythonOperator(
         task_id='send_alert',
-        python_callable=send_alert,
-        provide_context=True,
+        python_callable=send_alert,        
     )
     
     # Task 5b: Send results (both branches converge here)
     send_results_task = PythonOperator(
         task_id='send_evaluation_results',
-        python_callable=send_evaluation_results,
-        provide_context=True,
+        python_callable=send_evaluation_results,        
         trigger_rule='none_failed_min_one_success',  # Run if at least one upstream task succeeds
     )
     

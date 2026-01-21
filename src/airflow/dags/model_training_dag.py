@@ -40,14 +40,14 @@ def prepare_training_data(**context):
     data_path = "/opt/airflow/data/raw/synthetic_data.csv"
     
     try:
-        # Load data using data loader
-        (X_train, y_train), (X_test, y_test), metadata = load_data_for_training(
+        # ⭐ Load data using data loader (10개 값을 모두 받기)
+        X_train_str, X_train_num, y_train, X_fine_str, X_fine_num, y_fine, X_test_str, X_test_num, y_test, metadata = load_data_for_training(
             data_path=data_path,
-            test_size=0.2,
+            test_size=0.3,  # 0.3으로 맞춤 (다른 DAG와 일치)
             random_state=42
         )
         
-        logger.info(f"Loaded training data: {len(X_train)} train, {len(X_test)} test samples")
+        logger.info(f"Loaded training data: {len(y_train)} train, {len(y_fine)} fine-tune, {len(y_test)} test samples")
         logger.info(f"Features: {metadata['num_categorical_features']} categorical, "
                    f"{metadata['num_numerical_features']} numerical")
         
@@ -55,9 +55,10 @@ def prepare_training_data(**context):
         mongodb_client.connect()
         try:
             mongodb_client.get_collection("training_data").insert_one({
-                "timestamp": datetime.utcnow(),
-                "num_train_samples": len(X_train),
-                "num_test_samples": len(X_test),
+                "timestamp": datetime. utcnow(),
+                "num_train_samples": len(y_train),
+                "num_finetune_samples": len(y_fine),
+                "num_test_samples": len(y_test),
                 "num_categorical_features": metadata['num_categorical_features'],
                 "num_numerical_features": metadata['num_numerical_features'],
                 "status": "prepared"
@@ -70,8 +71,9 @@ def prepare_training_data(**context):
         
     except Exception as e:
         logger.error(f"Error preparing training data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
-
 
 def pretrain_model(**context):
     """Pretrain the encoder using contrastive learning."""

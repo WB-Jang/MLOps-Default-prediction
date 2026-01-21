@@ -2,6 +2,39 @@
 
 A comprehensive MLOps pipeline for loan default prediction using PyTorch, Airflow, and MongoDB.
 
+# 배포
+
+```실행 시
+cd /AI_ML_DL/Projects/MLOps-Default-prediction
+docker-compose down
+docker compose up -d
+```
+
+```포트 사용 시
+sudo lsof -i :5432
+sudo systemctl stop postgresql
+```
+
+```test 방법
+# 태스크를 테스트 모드로 직접 실행
+docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline load_latest_model 2026-01-21
+docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline evaluate_model 2026-01-21
+docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline check_model_performance 2026-01-21
+docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline prepare_retraining_data 2026-01-21
+```
+
+```dag 실행 내역 삭제
+docker compose exec airflow-scheduler airflow dags delete model_evaluation_pipeline -y
+```
+
+```
+# 구문 에러 확인
+python -m py_compile src/data/data_gen_loader_processor.py && echo "✅ No syntax errors" || echo "❌ Syntax error found"
+
+# 컨테이너 재시작
+docker compose restart airflow-scheduler airflow-webserver
+
+```
 ## Architecture Overview
 
 This project implements a complete MLOps pipeline with the following components:
