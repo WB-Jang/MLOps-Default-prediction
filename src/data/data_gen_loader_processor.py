@@ -10,11 +10,12 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 import torch
+from sdv.single_table import GaussianCopulaSynthesizer
 
 class DataGenLoaderProcessor:
     """Generate and Load and manage raw data for the pipeline."""
     
-    def __init__(self, data_path: str = "synthetic_data.csv"):
+    def __init__(self, data_path: str = "./data/raw/synthetic_data.csv"):
         """
         Initialize data loader.
         
@@ -28,7 +29,9 @@ class DataGenLoaderProcessor:
         self.numerical_columns: List[str] = []
         
     def data_generation(self, data_quantity: int = 10000):
-        synthesizer = GaussianCopulaSynthesizer.load('distribution_model.pkl')
+        import os
+        model_path = os.path.join(os.path.dirname(__file__), 'distribution_model.pkl')
+        synthesizer = GaussianCopulaSynthesizer.load(model_path)
         synthetic_data = synthesizer.sample(data_quantity)
         synthetic_data.to_csv(self.data_path,index=False, encoding='utf-8-sig')
         

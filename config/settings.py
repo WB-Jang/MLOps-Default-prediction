@@ -50,8 +50,9 @@ class Settings(BaseSettings):
     def mongodb_connection_string(self) -> str:
         """Build MongoDB connection string."""
         if self.mongodb_username and self.mongodb_password:
-            return f"mongodb://{self.mongodb_username}:{self.mongodb_password}@{self.mongodb_host}:{self.mongodb_port}/{self.mongodb_database}"
-        return f"mongodb://{self.mongodb_host}:{self.mongodb_port}/{self.mongodb_database}"
+            # 데이터베이스 이름 제거 - 인증은 admin DB에서 수행
+            return f"mongodb://{self.mongodb_username}:{self.mongodb_password}@{self.mongodb_host}:{self.mongodb_port}/"
+        return f"mongodb://{self.mongodb_host}:{self.mongodb_port}/"
 
 
 # Global settings instance

@@ -37,7 +37,7 @@ def prepare_training_data(**context):
     """Prepare training data from raw CSV file."""
     logger.info("Preparing training data")
     
-    data_path = "/opt/airflow/data/raw/synthetic_data.csv"
+    data_path = "./data/raw/synthetic_data.csv"
     
     try:
         # Load data using data loader

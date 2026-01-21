@@ -49,8 +49,8 @@ class MongoDBClient:
         Returns:
             MongoDB collection object
         """
-        if not self.db:
-            raise RuntimeError("Database not connected. Call connect() first.")
+        if self.db is None:
+            raise RuntimeError("Database not connected.  Call connect() first.")
         return self.db[collection_name]
     def upload_model_file(self, file_path: str, model_name: str, version: str) -> str:
         """

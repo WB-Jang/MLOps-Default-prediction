@@ -17,8 +17,8 @@ from src.database.mongodb import mongodb_client
 from src.data.data_gen_loader_processor import DataGenLoaderProcessor
 
 # 설정
-DATA_PATH = "/opt/airflow/data/raw/synthetic_data.csv"
-PROCESSED_DATA_PATH = "/opt/airflow/data/processed/processed_data.csv"
+DATA_PATH = "./data/raw/synthetic_data.csv"
+PROCESSED_DATA_PATH = "./data/processed/processed_data.csv"
 DATASET_NAME = "loan_default_prediction"
 DISTRIBUTION_MODEL_PATH = "./src/data/distribution_model.pkl"
 
@@ -39,7 +39,7 @@ def generate_data_task(**context):
     logger.info("Starting data generation using distribution model...")
     
     # 데이터 디렉토리 생성
-    # os.makedirs removed - directory exists via docker volume
+    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
     
     try:
         processor = DataGenLoaderProcessor(data_path=DATA_PATH)

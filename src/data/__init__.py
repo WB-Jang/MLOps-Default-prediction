@@ -1,12 +1,11 @@
 """Data processing package."""
-from .preprocessing import (
-    DataPreprocessor,
-    prepare_data_for_kafka,
-    parse_kafka_data
+
+from .data_gen_loader_processor import (
+    DataGenLoaderProcessor,
+    load_data_for_training
 )
 
 __all__ = [
-    "DataPreprocessor",
-    "prepare_data_for_kafka",
-    "parse_kafka_data"
+    "DataGenLoaderProcessor",
+    "load_data_for_training",
 ]
