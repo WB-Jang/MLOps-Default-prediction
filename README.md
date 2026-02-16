@@ -10,11 +10,6 @@ docker compose down
 docker compose up -d
 ```
 
-```포트 사용 시
-sudo lsof -i :5432
-sudo systemctl stop postgresql
-```
-
 ```test 방법
 # 태스크를 테스트 모드로 직접 실행
 <이미 container가 올라가 있을 때에 사용하는 방법>
