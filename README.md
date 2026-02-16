@@ -17,10 +17,26 @@ sudo systemctl stop postgresql
 
 ```test 방법
 # 태스크를 테스트 모드로 직접 실행
+<이미 container가 올라가 있을 때에 사용하는 방법>
+docker compose exec <서비스_이름> python <파일_경로>/program.py
+
 docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline load_latest_model 2026-01-21
 docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline evaluate_model 2026-01-21
 docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline check_model_performance 2026-01-21
 docker compose exec airflow-scheduler airflow tasks test model_evaluation_pipeline prepare_retraining_data 2026-01-21
+
+<container를 올리지 않고 Dockerfile을 활용하여 실행하는 방법>
+docker의 환경을 그대로 활용하여 특정 .py를 실행하고 싶을 때에는 
+docker compose run --rm airflow-scheduler python /opt/airflow/src/data/test.py
+```
+
+
+```MongoDB 결과 조회
+docker compose exec mongodb mongosh mlops_default_prediction \
+  -u admin \
+  -p changeme \
+  --authenticationDatabase admin \
+  --eval "db.alerts.find().sort({_id:-1}).limit(1)"
 ```
 
 ```dag 실행 내역 삭제

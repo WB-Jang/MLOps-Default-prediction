@@ -549,8 +549,10 @@ def evaluate_finetuned_model(**context):
     logger.info("Evaluating fine-tuned model")
     
     ti = context['ti']
-    finetuned_info = ti.xcom_pull(task_ids='finetune_model')
-    
+    finetuned_info = ti.xcom_pull(
+    task_ids='finetune_model',
+    include_prior_dates=True  # 이 옵션이 핵심입니다!
+)
     # Get test metrics from fine-tuning
     test_metrics = finetuned_info['test_metrics']
     
@@ -589,12 +591,15 @@ def evaluate_finetuned_model(**context):
         )
         logger.info(f"Fine-tuned model metrics stored with ID: {metrics_id}")
         
-        return {
+        # 1. 만약 다른 태스크에서 이 정보들이 필요하다면, 명시적으로 XCom에 푸시합니다.
+        ti.xcom_push(key='evaluation_result', value={
             "model_id": finetuned_info['model_id'],
             "metrics": test_metrics,
-            "finetuned_from": finetuned_info['finetuned_from'],
-            "next_task": next_task
-        }
+            "finetuned_from": finetuned_info['finetuned_from']
+        })
+
+        # 2. Return은 오직 다음에 실행할 "태스크 ID" 문자열만 합니다.
+        return next_task
     finally:
         mongodb_client.disconnect()
 
@@ -609,14 +614,16 @@ def send_alert(**context):
     retry_count = ti.xcom_pull(key='retry_count', default=MAX_RETRAIN_ATTEMPTS)
     
     # Get latest finetuned metrics if available
-    finetuned_result = ti.xcom_pull(task_ids='evaluate_finetuned_model')
+    finetuned_result = ti.xcom_pull(task_ids='evaluate_finetuned_model', key='evaluation_result')
     
     if finetuned_result:
         final_f1 = finetuned_result['metrics']['f1_score']
         final_model_id = finetuned_result['model_id']
     else:
-        final_f1 = performance_check['metrics']['f1_score']
-        final_model_id = model_info['model_id']
+        performance_check = ti.xcom_pull(key='performance_check', task_ids='check_model_performance')
+        model_info = ti.xcom_pull(task_ids='load_latest_model')
+        final_f1 = performance_check['metrics']['f1_score'] if performance_check else 0.0
+        final_model_id = model_info['model_id'] if model_info else "unknown"
     
     alert_message = {
         "alert_type": "MODEL_PERFORMANCE_FAILURE",
@@ -671,11 +678,17 @@ def send_evaluation_results(**context):
     
     # Get evaluation status
     ti = context['ti']
+    # Check if retraining was performed
+    finetuned_result = ti.xcom_pull(task_ids='evaluate_finetuned_model', key='evaluation_result')
+    
     performance_check = ti.xcom_pull(key='performance_check', task_ids='check_model_performance')
     model_info = ti.xcom_pull(task_ids='load_latest_model')
+
+    if isinstance(finetuned_result, str) or finetuned_result is None:
+        # 분기 연산자의 return_value(문자열)를 가져온 경우 처리
+        logger.warning("Finetuned result dictionary not found in default XCom. Checking if it's in the fallback key...")
+        # (이미 위에서 key를 지정했으므로 실제로는 여기서 걸릴 일이 거의 없어야 합니다.)
     
-    # Check if retraining was performed
-    finetuned_result = ti.xcom_pull(task_ids='evaluate_finetuned_model')
     
     # Determine final status and metrics
     if finetuned_result:
@@ -736,6 +749,7 @@ with DAG(
     description='Model evaluation pipeline with MongoDB',
     schedule_interval=timedelta(days=1),
     catchup=False,
+    max_active_runs=1,
     tags=['evaluation', 'mongodb'],
 ) as dag:
     

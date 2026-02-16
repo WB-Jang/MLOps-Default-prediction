@@ -45,7 +45,7 @@ def generate_data_task(**context):
     try:
         processor = DataGenLoaderProcessor(data_path=DATA_PATH)
         # Use distribution model to generate synthetic data
-        processor.data_generation(data_quantity=10000)
+        processor.data_generation(data_quantity=100000)
         
         logger.info(f"Data generated successfully at {DATA_PATH}")
         

@@ -50,7 +50,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432" # 포트 충돌을 방지하기 위하여, 외부 포트를 5433으로 변경
     networks:
       - mlops-network
 
