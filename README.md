@@ -6,7 +6,7 @@ A comprehensive MLOps pipeline for loan default prediction using PyTorch, Airflo
 
 ```실행 시
 cd /AI_ML_DL/Projects/MLOps-Default-prediction
-docker-compose down
+docker compose down
 docker compose up -d
 ```
 
