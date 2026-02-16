@@ -154,7 +154,7 @@ MLOps-Default-prediction/
        ├─ 1차 재학습 → 평가
        ├─ 2차 재학습 → 평가 (필요시)
        ├─ 3차 재학습 → 평가 (필요시)
-       └─ 3회 후에도 실패 → Alert 발송
+       └─ 3회 후에도 실패 → 가장 최근 Approved model 사용 and Alert 발송
    ↓
 6. 승인된 모델 MongoDB에 새 버전으로 저장
    ↓
