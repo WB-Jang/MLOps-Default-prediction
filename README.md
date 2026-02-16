@@ -80,6 +80,13 @@ Docker Compose로 전체 스택 배포
 Airflow, MongoDB 통합 환경
 ```
 
+6. Points
+```
+실무적 재학습 전략: 최대 3회 재학습 후 Alert
+모델 성능 추적: MongoDB로 모든 평가 이벤트를 기록하여 모델 드리프트 모니터링 가능
+End-to-End 파이프라인: 데이터 생성 → 학습 → 평가 → 배포까지 완전 자동화
+Tab Transformer 활용: 테이블 데이터에 적합한 최신 아키텍처 사용
+```
 ## Architecture Overview
 
 This project implements a complete MLOps pipeline with the following components:
