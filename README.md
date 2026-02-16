@@ -46,6 +46,40 @@ python -m py_compile src/data/data_gen_loader_processor.py && echo "✅ No synta
 docker compose restart airflow-scheduler airflow-webserver
 
 ```
+
+## Summary 
+1. 파이프라인 오케스트레이션 (Airflow)
+```
+Data Ingestion DAG
+Model Training DAG
+Model Evaluation DAG (재학습 메커니즘 포함)
+Model Deployment DAG
+```
+
+2. 모델 버전 관리 & 메타데이터 추적
+```
+MongoDB를 활용한 모델 버전 관리
+하이퍼파라미터, 성능 지표, 학습 로그 저장
+```
+
+3. 자동화된 재학습 & 모니터링
+```
+F1 Score 기반 자동 재학습 (최대 3회)
+Alert 시스템 (성능 저하 시 MongoDB에 알림 저장)
+```
+
+4. 데이터 파이프라인
+```
+SDV 기반 합성 데이터 생성
+데이터 전처리 및 Feature Engineering
+```
+
+5. 컨테이너화 & 인프라
+```
+Docker Compose로 전체 스택 배포
+Airflow, MongoDB 통합 환경
+```
+
 ## Architecture Overview
 
 This project implements a complete MLOps pipeline with the following components:
